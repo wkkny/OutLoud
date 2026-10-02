@@ -4,7 +4,7 @@ import time
 
 from .recording import Recorder
 from .shortcuts import Controls, FnListener
-from .transcription import transcription_worker
+from .transcription import enqueue_recording, transcription_worker
 
 
 def recording_worker(events, recordings):
@@ -13,7 +13,7 @@ def recording_worker(events, recordings):
     def stop_recording():
         path = recorder.stop()
         if path is not None:
-            recordings.put(path)
+            enqueue_recording(recordings, path)
 
     controls = Controls(recorder.start, stop_recording)
 
@@ -24,7 +24,7 @@ def recording_worker(events, recordings):
             print(f"Recording cleanup error: {cleanup_error}", flush=True)
         saved_path = getattr(error, "saved_path", None)
         if saved_path is not None:
-            recordings.put(saved_path)
+            enqueue_recording(recordings, saved_path)
         print(
             f"Recording failed: {error}. Check your microphone or permissions, "
             "then press Fn again to retry.",

@@ -109,7 +109,7 @@ class WorkerTests(unittest.TestCase):
         events.put(None)
         with patch("voice_dump.app.Recorder", return_value=recorder):
             recording_worker(events, recordings)
-        return list(recordings.queue)
+        return [job.path for job in recordings.queue]
 
     def test_start_failure_does_not_kill_worker_or_enqueue_empty_audio(self):
         recorder = MagicMock()
@@ -141,7 +141,7 @@ class WorkerTests(unittest.TestCase):
         with patch("voice_dump.app.Recorder", return_value=recorder):
             recording_worker(events, recordings)
         recorder.stop.assert_called_once()
-        self.assertEqual(recordings.get_nowait(), Path("partial.wav"))
+        self.assertEqual(recordings.get_nowait().path, Path("partial.wav"))
 
     def test_cleanup_exception_does_not_kill_worker(self):
         recorder = MagicMock()
