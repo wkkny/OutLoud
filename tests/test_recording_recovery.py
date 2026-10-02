@@ -6,9 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from voice_dump.app import recording_worker
-from voice_dump.recording import Recorder, RecordingError
-from voice_dump.shortcuts import Controls
+from outloud.app import recording_worker
+from outloud.recording import Recorder, RecordingError
+from outloud.shortcuts import Controls
 
 
 class RecorderTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class RecorderTests(unittest.TestCase):
         self.stream = MagicMock()
         self.stream.active = True
         self.factory = patch(
-            "voice_dump.recording.sd.RawInputStream", return_value=self.stream
+            "outloud.recording.sd.RawInputStream", return_value=self.stream
         )
         self.create_stream = self.factory.start()
         self.recorder = Recorder()
@@ -107,7 +107,7 @@ class WorkerTests(unittest.TestCase):
         for event in sequence:
             events.put(event)
         events.put(None)
-        with patch("voice_dump.app.Recorder", return_value=recorder):
+        with patch("outloud.app.Recorder", return_value=recorder):
             recording_worker(events, recordings)
         return [job.path for job in recordings.queue]
 
@@ -138,7 +138,7 @@ class WorkerTests(unittest.TestCase):
         events = MagicMock()
         events.get.side_effect = [(True, 0), queue.Empty(), None]
         recordings = queue.Queue()
-        with patch("voice_dump.app.Recorder", return_value=recorder):
+        with patch("outloud.app.Recorder", return_value=recorder):
             recording_worker(events, recordings)
         recorder.stop.assert_called_once()
         self.assertEqual(recordings.get_nowait().path, Path("partial.wav"))

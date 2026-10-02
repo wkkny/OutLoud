@@ -1,4 +1,4 @@
-# Voice dump UI
+# OutLoud UI
 
 A minimal voice-first interface built with React, TypeScript, Vite, Tailwind, and
 shadcn/ui. Geist is bundled locally; no external font request is required.
@@ -8,7 +8,7 @@ shadcn/ui. Geist is bundled locally; no external font request is required.
 Start the backend from the repository root:
 
 ```bash
-uv run voice-dump-server
+uv run outloud
 ```
 
 In a second terminal:
@@ -20,7 +20,7 @@ bun dev
 ```
 
 Open **http://127.0.0.1:5173**. Keep the dev server on port 5173; the backend allows
-that origin. Do not run the separate `uv run voice-dump` CLI alongside it.
+that origin. Run only one backend instance.
 
 ## Use
 

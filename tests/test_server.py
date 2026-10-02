@@ -9,8 +9,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from voice_dump.runtime import RecordingRuntime
-from voice_dump.server import create_app
+from outloud.runtime import RecordingRuntime
+from outloud.server import create_app
 
 ORIGIN = {"Origin": "http://localhost:5173"}
 
@@ -58,7 +58,7 @@ class ServerTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.recorder = FakeRecorder(Path(self.directory.name))
-        self.model_patch = patch("voice_dump.transcription.whisper.load_model")
+        self.model_patch = patch("outloud.transcription.whisper.load_model")
         load = self.model_patch.start()
         load.return_value.transcribe.return_value = {"text": " Hello from voice. "}
         self.model = load.return_value

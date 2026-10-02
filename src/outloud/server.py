@@ -94,7 +94,7 @@ def create_app(runtime_factory=RecordingRuntime):
             await asyncio.to_thread(runtime.stop)
             loop = None
 
-    app = FastAPI(title="Voice Dump", lifespan=lifespan)
+    app = FastAPI(title="OutLoud", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
     app.add_middleware(
         CORSMiddleware,

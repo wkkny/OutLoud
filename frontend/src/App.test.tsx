@@ -41,7 +41,7 @@ describe('voice-first UI', () => {
     render(<App />)
     act(() => socket().close())
     expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    expect(screen.getByText('uv run voice-dump-server')).toBeInTheDocument()
+    expect(screen.getByText('uv run outloud')).toBeInTheDocument()
     await userEvent.type(screen.getByRole('textbox', { name: 'Your text' }), 'Draft without a backend')
     expect(screen.getByRole('textbox')).toHaveValue('Draft without a backend')
     expect(screen.getByRole('button', { name: /Send message/ })).toBeDisabled()

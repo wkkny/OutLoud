@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from voice_dump.metrics import ResourceSampler, save_metrics
-from voice_dump.transcription import TranscriptionJob, enqueue_recording, transcription_worker
+from outloud.metrics import ResourceSampler, save_metrics
+from outloud.transcription import TranscriptionJob, enqueue_recording, transcription_worker
 
 
 def snapshot(available, rss, swap_out):
@@ -22,7 +22,7 @@ def snapshot(available, rss, swap_out):
 class MetricsTests(unittest.TestCase):
     def test_resource_summary_tracks_peaks_and_swap_delta(self):
         sampler = ResourceSampler()
-        with patch("voice_dump.metrics.resource_snapshot", side_effect=[
+        with patch("outloud.metrics.resource_snapshot", side_effect=[
             snapshot(100, 20, 5), snapshot(50, 40, 15), snapshot(90, 30, 15)
         ]):
             sampler.sample()
@@ -35,7 +35,7 @@ class MetricsTests(unittest.TestCase):
 
     def test_sampler_thread_stops_cleanly(self):
         sampler = ResourceSampler(interval=60)
-        with patch("voice_dump.metrics.resource_snapshot", return_value=snapshot(100, 20, 5)):
+        with patch("outloud.metrics.resource_snapshot", return_value=snapshot(100, 20, 5)):
             sampler.start()
             result = sampler.stop()
         self.assertFalse(sampler.thread.is_alive())
@@ -43,7 +43,7 @@ class MetricsTests(unittest.TestCase):
 
     def test_resource_sampling_failure_does_not_raise(self):
         sampler = ResourceSampler()
-        with patch("voice_dump.metrics.resource_snapshot", side_effect=RuntimeError("unavailable")):
+        with patch("outloud.metrics.resource_snapshot", side_effect=RuntimeError("unavailable")):
             sampler.start()
             result = sampler.stop()
         self.assertEqual(result["sampling_error"], "unavailable")
@@ -54,7 +54,7 @@ class MetricsTests(unittest.TestCase):
 
     def test_enqueue_timestamps_job(self):
         jobs = queue.Queue()
-        with patch("voice_dump.transcription.time.monotonic", return_value=123):
+        with patch("outloud.transcription.time.monotonic", return_value=123):
             enqueue_recording(jobs, Path("audio.wav"))
         self.assertEqual(jobs.get_nowait(), TranscriptionJob(Path("audio.wav"), 123))
 
@@ -69,9 +69,9 @@ class MetricsTests(unittest.TestCase):
         jobs.put(TranscriptionJob(path, 2))
         jobs.put(None)
         with (
-            patch("voice_dump.transcription.whisper.load_model") as load,
-            patch("voice_dump.transcription.ResourceSampler") as sampler,
-            patch("voice_dump.transcription.time.monotonic", side_effect=[5, 6, 8, 9, 10, 11]),
+            patch("outloud.transcription.whisper.load_model") as load,
+            patch("outloud.transcription.ResourceSampler") as sampler,
+            patch("outloud.transcription.time.monotonic", side_effect=[5, 6, 8, 9, 10, 11]),
         ):
             sampler.return_value.stop.return_value = {"sample_count": 2}
             if failure:

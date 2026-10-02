@@ -1,10 +1,9 @@
 import queue
-import threading
 import time
 
 from .recording import Recorder
-from .shortcuts import Controls, FnListener
-from .transcription import enqueue_recording, transcription_worker
+from .shortcuts import Controls
+from .transcription import enqueue_recording
 
 
 def recording_worker(events, recordings, on_event=None, recorder=None):
@@ -122,32 +121,3 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
             recover(error)
         publish_state()
 
-
-def main():
-    events = queue.Queue()
-    recordings = queue.Queue()
-    listener = FnListener(events)
-    listener.start()
-
-    transcriber = threading.Thread(target=transcription_worker, args=(recordings,))
-    worker = threading.Thread(target=recording_worker, args=(events, recordings))
-    transcriber.start()
-    worker.start()
-
-    print("Hold Fn to record. Double-tap for hands-free. Ctrl+C to quit.", flush=True)
-    try:
-        listener.run()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        listener.stop()
-        events.put(None)
-        worker.join()
-        # Finish all saved recordings before the transcription worker exits.
-        recordings.put(None)
-        print("Finishing queued transcriptions before exiting...", flush=True)
-        transcriber.join()
-
-
-if __name__ == "__main__":
-    main()

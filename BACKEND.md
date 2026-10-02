@@ -3,12 +3,12 @@
 Start from the project root:
 
 ```bash
-uv run voice-dump-server
+uv run outloud
 ```
 
 The server listens on **127.0.0.1:8765**. API documentation is at
-`http://127.0.0.1:8765/docs`. Do not run the CLI recorder at the same time:
-`uv run voice-dump` is still a separate Fn-controlled app.
+`http://127.0.0.1:8765/docs`. There is one app entry point; the standalone Fn
+recorder has been removed. `uv run python -m outloud` also starts this backend.
 
 ## Implementation
 

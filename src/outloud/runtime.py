@@ -172,7 +172,7 @@ class RecordingRuntime:
                 self.workers[name]["status"] = "starting"
                 self.threads[name] = threading.Thread(
                     target=self.run_worker, args=(name, target, args, started[name]),
-                    name=f"voice-dump-{name}",
+                    name=f"outloud-{name}",
                 )
         for thread in self.threads.values():
             thread.start()

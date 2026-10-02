@@ -3,7 +3,7 @@
 Run the app as usual:
 
 ```bash
-uv run voice-dump
+uv run outloud
 ```
 
 Each recording folder now contains `audio.wav`, `transcript.txt` (on success), and
@@ -34,13 +34,13 @@ these are sampled values, not guaranteed maxima.
 For a separate live view of host RAM and swap, run:
 
 ```bash
-uv run python -m voice_dump.metrics
+uv run python -m outloud.metrics
 ```
 
 Or take five samples:
 
 ```bash
-uv run python -m voice_dump.metrics --interval 1 --count 5
+uv run python -m outloud.metrics --interval 1 --count 5
 ```
 
 These are **memory-pressure indicators**, not macOS's official Memory Pressure

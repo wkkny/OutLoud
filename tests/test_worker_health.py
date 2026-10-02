@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from voice_dump.runtime import RecordingRuntime, RuntimeUnavailable
-from voice_dump.server import create_app
+from outloud.runtime import RecordingRuntime, RuntimeUnavailable
+from outloud.server import create_app
 
 ORIGIN = {"Origin": "http://localhost:5173"}
 

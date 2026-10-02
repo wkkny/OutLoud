@@ -37,7 +37,7 @@ export default function App() {
     <div className="min-h-svh bg-muted/20">
       <header className="border-b bg-background">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-5 py-4 sm:px-8">
-          <span className="text-sm font-semibold tracking-tight">Voice dump</span>
+          <span className="text-sm font-semibold tracking-tight">OutLoud</span>
           <Badge variant="outline" className="font-normal">
             {connected ? 'Connected · local' : connection === 'connecting' ? 'Connecting…' : connection === 'in-use' ? 'In use in another tab' : 'Disconnected'}
           </Badge>
@@ -54,7 +54,7 @@ export default function App() {
           <Alert>
             <AlertTitle>{connection === 'in-use' ? 'Another tab is using the microphone session' : 'Connect to your local backend'}</AlertTitle>
             <AlertDescription>
-              <p>{connection === 'in-use' ? 'Close the other tab, then reconnect here.' : <>Run <code className="rounded bg-muted px-1 py-0.5">uv run voice-dump-server</code> in the project folder.</>}</p>
+              <p>{connection === 'in-use' ? 'Close the other tab, then reconnect here.' : <>Run <code className="rounded bg-muted px-1 py-0.5">uv run outloud</code> in the project folder.</>}</p>
               <Button variant="outline" size="sm" className="mt-2 w-fit" disabled={connection === 'connecting' || safety === 'stopping'} onClick={() => void reconnect()}>
                 <RefreshCw /> Reconnect
               </Button>
