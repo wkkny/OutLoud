@@ -1,6 +1,9 @@
 # Local HTTP and WebSocket backend
 
-Start from the project root:
+To run the backend and web UI together, use `bun run dev` from the project root.
+See [README.md](README.md) for setup and all repository checks.
+
+To run only the backend, start from the project root:
 
 ```bash
 uv run outloud
@@ -163,7 +166,7 @@ programs or users on the same machine. Do not expose the server to a network.
 
 Not implemented in this step:
 
-- React UI, Ollama chat, and conversation persistence.
+- Ollama chat and conversation persistence.
 - Backend Fn interception or the UI toggle. The backend never captures Fn yet.
 - Transcript replay/deduplication after reconnect. Files remain saved on disk.
 - A bounded transcription queue or chunked long-recording transcription.

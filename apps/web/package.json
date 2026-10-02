@@ -1,5 +1,5 @@
 {
-  "name": "outloud-ui",
+  "name": "@outloud/web",
   "private": true,
   "version": "0.0.0",
   "type": "module",

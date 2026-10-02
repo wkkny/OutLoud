@@ -5,19 +5,16 @@ shadcn/ui. Geist is bundled locally; no external font request is required.
 
 ## Run
 
-Start the backend from the repository root:
+From the repository root, install dependencies and start both servers:
 
 ```bash
-uv run outloud
+bun run setup
+bun run dev
 ```
 
-In a second terminal:
-
-```bash
-cd frontend
-bun install
-bun dev
-```
+To run only this frontend, use `bun run dev:web` from the root. Start the backend
+separately with `bun run dev:backend` or `uv run outloud`. See the
+[root README](../../README.md) for prerequisites and workspace commands.
 
 Open **http://127.0.0.1:5173**. Keep the dev server on port 5173; the backend allows
 that origin. Run only one backend instance.
@@ -79,8 +76,14 @@ Multiple pointers cannot release each other's holds.
 
 ## Verify
 
+Run all repository checks from the root with `bun run check`. For web-only checks:
+
 ```bash
+cd apps/web
 bun run test
 bun run build
 bun run lint
 ```
+
+Use Vitest through `bun run test`, not Bun's native `bun test`. Dependencies are
+managed by the root `bun.lock`; this workspace has no separate lockfile.

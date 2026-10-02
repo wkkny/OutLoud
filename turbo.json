@@ -1,0 +1,36 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "agentGuidance": false,
+  "remoteCache": { "enabled": false },
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "outputs": []
+    },
+    "lint": {
+      "outputs": []
+    },
+    "check:deps": {
+      "cache": false
+    },
+    "@outloud/backend#test": {
+      "cache": false,
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/src/outloud/**/*.py",
+        "$TURBO_ROOT$/tests/**/*.py",
+        "$TURBO_ROOT$/pyproject.toml",
+        "$TURBO_ROOT$/uv.lock",
+        "$TURBO_ROOT$/.python-version"
+      ]
+    }
+  }
+}

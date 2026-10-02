@@ -3,3 +3,5 @@ __pycache__/
 *.py[cod]
 recording.wav
 recordings/
+node_modules/
+.turbo/

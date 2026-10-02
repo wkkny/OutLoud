@@ -1,0 +1,10 @@
+{
+  "name": "@outloud/backend",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "cd ../.. && uv run --locked outloud",
+    "test": "cd ../.. && uv run --locked python -m unittest discover -s tests -v",
+    "check:deps": "cd ../.. && uv lock --check && uv pip check"
+  }
+}
