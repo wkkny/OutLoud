@@ -43,6 +43,17 @@ controls, and errors. Commands are sent in order and state revisions prevent old
 snapshots from replacing newer ones. Duplicate transcript IDs are ignored within
 this page session.
 
+Connecting has a five-second deadline, including waiting for a valid `session.ready`
+message after the socket opens. On timeout or handshake failure, the socket closes
+and **Reconnect** becomes available. Late events from expired attempts are ignored.
+Retry is manual, and typed text is preserved.
+
+Existing recording/transcription errors from the initial snapshot appear as
+**Previous … error**, with a timestamp and recording ID when available. These are
+historical failures, not a declaration that the backend is currently unavailable.
+Dismissal lasts for this page session, including reconnects. New live errors still
+appear separately, even if an older error was dismissed.
+
 If a command fails or the connected socket disconnects, queued controls are canceled
 and the owner session is closed. The backend invalidates its token and queues a stop.
 The UI polls uncached state to confirm the session is gone, recording is idle, and

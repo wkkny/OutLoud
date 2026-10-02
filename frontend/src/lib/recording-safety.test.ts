@@ -1,16 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { confirmRecordingStopped } from './recording-safety'
+import { initialState } from '@/test/backend-fixture'
 
-const idle = {
-  revision: 1, pending_commands: 0, recording: false, hands_free: false,
-  recording_id: null, conversation_id: null, ready: true, shutting_down: false,
-  ui_connected: false,
-  transcription: { status: 'idle', active_job: null, queued_jobs: [] },
-  workers: {
-    recording: { status: 'running', error: null },
-    transcription: { status: 'running', error: null },
-  },
-}
+const idle = { ...initialState, ui_connected: false }
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 

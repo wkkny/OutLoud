@@ -9,7 +9,7 @@ import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
 
 export default function App() {
-  const { connection, snapshot, transcripts, error, pendingCommands, safety, command, handsFree, reconnect, dismissError } = useDictation()
+  const { connection, snapshot, transcripts, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, reconnect, dismissError } = useDictation()
   const [draft, setDraft] = useState('')
   const consumed = useRef(0)
   const press = useCallback(() => command('press'), [command])
@@ -85,6 +85,21 @@ export default function App() {
             <Button variant="ghost" size="icon-sm" className="absolute right-2 top-2" aria-label="Dismiss error" onClick={dismissError}><X /></Button>
           </Alert>
         )}
+
+        {pastErrors.map(({ id, kind, failure }) => (
+          <Alert key={id} className="relative pr-12">
+            <AlertTitle>Previous {kind} error</AlertTitle>
+            <AlertDescription>
+              <p>{failure.message}</p>
+              <p className="text-xs text-muted-foreground">
+                <time dateTime={failure.occurred_at}>{new Date(failure.occurred_at).toLocaleString()}</time>
+                {failure.recording_id && <> · Recording: <span className="break-all">{failure.recording_id}</span></>}
+              </p>
+              <p className="text-xs text-muted-foreground">This happened before you connected. See the current recording status for availability.</p>
+            </AlertDescription>
+            <Button variant="ghost" size="icon-sm" className="absolute right-2 top-2" aria-label={`Dismiss previous ${kind} error`} onClick={() => dismissPastError(id)}><X /></Button>
+          </Alert>
+        ))}
 
         <Card className="shadow-none">
           <CardContent className="flex flex-col gap-6 pt-6">

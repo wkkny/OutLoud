@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { eventSchema } from '@/lib/protocol'
 import { confirmRecordingStopped } from '@/lib/recording-safety'
-import type { Snapshot, Transcript } from '@/lib/protocol'
+import type { PastError, Snapshot, Transcript } from '@/lib/protocol'
 
 const HTTP_URL = 'http://127.0.0.1:8765'
 const WS_URL = 'ws://127.0.0.1:8765/events'
@@ -17,6 +17,8 @@ export function useDictation() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [transcripts, setTranscripts] = useState<Transcript[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [pastErrors, setPastErrors] = useState<PastError[]>([])
+  const dismissedErrors = useRef(new Set<string>())
   const [pendingCommands, setPendingCommands] = useState(0)
   const [safety, setSafety] = useState<Safety>('none')
   const session = useRef<string | null>(null)
@@ -49,12 +51,23 @@ export function useDictation() {
 
   useEffect(() => {
     let active = true
+    let established = false
     mounted.current = true
     generation.current += 1
     session.current = null
     latestRevision.current = -1
     const socket = new WebSocket(WS_URL)
     socketRef.current = socket
+
+    const connectionTimer = setTimeout(() => {
+      if (!active || established) return
+      active = false
+      session.current = null
+      setSnapshot(null)
+      setConnection('disconnected')
+      setError('Connection timed out after 5 seconds. Check the backend and reconnect.')
+      socket.close()
+    }, 5000)
 
     socket.onmessage = (message) => {
       if (!active || recovering.current) return
@@ -69,11 +82,23 @@ export function useDictation() {
       // Other backend events are represented by state.updated snapshots.
       if (!parsed.success) return
       const event = parsed.data
+      if (!established && event.type !== 'session.ready') return
       if (event.type === 'session.ready' || event.type === 'state.updated') {
         if (event.type === 'session.ready') {
+          if (established) return
+          established = true
+          clearTimeout(connectionTimer)
           session.current = event.session_id
           setConnection('connected')
           setError(null)
+          const previous: PastError[] = []
+          for (const kind of ['recording', 'transcription'] as const) {
+            const failure = event.state.errors[kind]
+            if (failure === null) continue
+            const id = JSON.stringify([kind, failure.recording_id, failure.occurred_at])
+            if (!dismissedErrors.current.has(id)) previous.push({ id, kind, failure })
+          }
+          setPastErrors(previous)
         }
         if (event.state.revision >= latestRevision.current) {
           latestRevision.current = event.state.revision
@@ -90,6 +115,8 @@ export function useDictation() {
 
     socket.onclose = (event) => {
       if (!active) return
+      active = false
+      clearTimeout(connectionTimer)
       const hadSession = session.current !== null
       session.current = null
       setSnapshot(null)
@@ -97,10 +124,18 @@ export function useDictation() {
       if (hadSession) void recover('Connection lost. The session was closed to stop recording safely.')
     }
     socket.onerror = () => {
-      if (active && !recovering.current) setError('Could not connect to the local backend.')
+      if (!active || recovering.current) return
+      setError('Could not connect to the local backend.')
+      if (!established) {
+        active = false
+        clearTimeout(connectionTimer)
+        setConnection('disconnected')
+        socket.close()
+      }
     }
     return () => {
       active = false
+      clearTimeout(connectionTimer)
       mounted.current = false
       session.current = null
       activeRequest.current?.abort()
@@ -172,6 +207,11 @@ export function useDictation() {
     snapshot,
     transcripts,
     error,
+    pastErrors,
+    dismissPastError: (id: string) => {
+      dismissedErrors.current.add(id)
+      setPastErrors((previous) => previous.filter((item) => item.id !== id))
+    },
     pendingCommands,
     safety,
     command,

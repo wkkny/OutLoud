@@ -1,35 +1,20 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { initialState } from '@/test/backend-fixture'
 
 class FakeSocket {
   static instances: FakeSocket[] = []
   onmessage: ((event: { data: string }) => void) | null = null
   onclose: ((event: { code: number }) => void) | null = null
   onerror: (() => void) | null = null
+  onopen: (() => void) | null = null
 
   closed = false
   constructor() { FakeSocket.instances.push(this) }
   close() { this.closed = true; this.onclose?.({ code: 1000 }) }
   emit(event: unknown) { this.onmessage?.({ data: JSON.stringify(event) }) }
-}
-
-const initialState = {
-  revision: 1,
-  pending_commands: 0,
-  recording: false,
-  hands_free: false,
-  recording_id: null,
-  conversation_id: null,
-  ready: true,
-  shutting_down: false,
-  ui_connected: true,
-  transcription: { status: 'idle', active_job: null, queued_jobs: [] },
-  workers: {
-    recording: { status: 'running', error: null },
-    transcription: { status: 'running', error: null },
-  },
 }
 
 function socket() { return FakeSocket.instances[FakeSocket.instances.length - 1] }
@@ -49,6 +34,8 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
 })
 
+afterEach(() => vi.useRealTimers())
+
 describe('voice-first UI', () => {
   it('keeps the composer usable while disconnected and disables recording', async () => {
     render(<App />)
@@ -58,6 +45,72 @@ describe('voice-first UI', () => {
     await userEvent.type(screen.getByRole('textbox', { name: 'Your text' }), 'Draft without a backend')
     expect(screen.getByRole('textbox')).toHaveValue('Draft without a backend')
     expect(screen.getByRole('button', { name: /Send message/ })).toBeDisabled()
+  })
+
+  it('enables retry after connection timeout without losing the draft', async () => {
+    vi.useFakeTimers()
+    render(<App />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this draft' } })
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeDisabled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    connect()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft')
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
+  })
+
+  it('shows initial recording and transcription failures without treating history as current unavailability', () => {
+    const { container } = render(<App />)
+    const errors = {
+      recording: { recording_id: null, conversation_id: 'local-draft', message: 'Earlier recording failed.', occurred_at: '2026-04-15T12:30:00.123456+00:00' },
+      transcription: { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00+00:00' },
+    }
+    act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors } }))
+    expect(screen.getByText('Previous recording error')).toBeInTheDocument()
+    expect(screen.getByText('Previous transcription error')).toBeInTheDocument()
+    expect(screen.getByText('Earlier recording failed.')).toBeInTheDocument()
+    expect(screen.getByText('recording-previous')).toBeInTheDocument()
+    expect(container.querySelector('time')?.getAttribute('datetime')).toBe(errors.recording.occurred_at)
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
+    expect(screen.queryByText('Recording backend is unavailable')).not.toBeInTheDocument()
+  })
+
+  it('keeps a dismissed historical failure dismissed across state updates and reconnect', async () => {
+    render(<App />)
+    const errors = {
+      recording: null,
+      transcription: { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00Z' },
+    }
+    act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors } }))
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss previous transcription error' }))
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, errors } }))
+    expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument()
+    act(() => socket().close())
+    await screen.findByText('Backend confirmed recording stopped')
+    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    act(() => socket().emit({ type: 'session.ready', session_id: 'new-session', state: { ...initialState, errors } }))
+    expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument()
+    act(() => socket().emit({ type: 'transcription.error', message: 'Earlier transcription failed.' }))
+    expect(screen.getByText('Something went wrong')).toBeInTheDocument()
+    expect(screen.getByText('Earlier transcription failed.')).toBeInTheDocument()
+  })
+
+  it('shows a different failure on reconnect even after an older failure was dismissed', async () => {
+    render(<App />)
+    const failure = { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00Z' }
+    act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors: { recording: null, transcription: failure } } }))
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss previous transcription error' }))
+    act(() => socket().close())
+    await screen.findByText('Backend confirmed recording stopped')
+    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    act(() => socket().emit({
+      type: 'session.ready', session_id: 'new-session',
+      state: { ...initialState, errors: { recording: null, transcription: { ...failure, recording_id: 'recording-new', occurred_at: '2026-04-15T12:32:00Z' } } },
+    }))
+    expect(screen.getByText('Previous transcription error')).toBeInTheDocument()
+    expect(screen.getByText('recording-new')).toBeInTheDocument()
   })
 
   it('appends a transcript without replacing typed text or inserting duplicates', async () => {

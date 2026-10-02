@@ -5,6 +5,13 @@ const jobSchema = z.object({
   conversation_id: z.string().nullable(),
 })
 
+const backendFailureSchema = z.object({
+  recording_id: z.string().nullable(),
+  conversation_id: z.string().nullable(),
+  message: z.string(),
+  occurred_at: z.iso.datetime({ offset: true }),
+})
+
 const workerSchema = z.object({
   status: z.enum(['starting', 'running', 'stopped', 'failed']),
   error: z.object({ type: z.string(), message: z.string() }).nullable(),
@@ -26,6 +33,10 @@ export const snapshotSchema = z.object({
     queued_jobs: z.array(jobSchema),
   }),
   workers: z.object({ recording: workerSchema, transcription: workerSchema }),
+  errors: z.object({
+    recording: backendFailureSchema.nullable(),
+    transcription: backendFailureSchema.nullable(),
+  }),
 })
 
 export const eventSchema = z.discriminatedUnion('type', [
@@ -43,6 +54,12 @@ export const eventSchema = z.discriminatedUnion('type', [
   }),
 ])
 
+export type BackendFailure = z.infer<typeof backendFailureSchema>
+export type PastError = {
+  id: string
+  kind: 'recording' | 'transcription'
+  failure: BackendFailure
+}
 export type Snapshot = z.infer<typeof snapshotSchema>
 export type Transcript = {
   recordingId: string
