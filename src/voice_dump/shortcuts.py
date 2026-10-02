@@ -30,6 +30,14 @@ class Controls:
         if was_recording:
             self.stop_recording()
 
+    def start_hands_free(self, now):
+        if not self.recording:
+            self.start_recording()
+            self.recording = True
+            self.pressed_at = now
+        self.hands_free = True
+        self.stop_at = None
+
     def tick(self, now):
         if self.stop_at is not None and now >= self.stop_at:
             self.stop()

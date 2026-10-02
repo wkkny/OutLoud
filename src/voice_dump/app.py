@@ -85,6 +85,15 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
                     if action == "stop":
                         pressed = False
                         controls.stop()
+                    elif action == "hands-free":
+                        pressed = False
+                        controls.tick(event["timestamp"])
+                        if not controls.recording:
+                            context = {
+                                "conversation_id": event["conversation_id"],
+                                "session_id": event["session_id"],
+                            }
+                        controls.start_hands_free(event["timestamp"])
                     else:
                         is_pressed = action == "press"
                         if is_pressed != pressed:
@@ -104,6 +113,8 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
                     pressed = False
                 recover(error)
             publish_state()
+            if isinstance(event, dict):
+                notify({"type": "recording.command_completed", "session_id": event["session_id"]})
     finally:
         try:
             controls.stop()

@@ -143,6 +143,11 @@ def create_app(runtime_factory=RecordingRuntime):
         submit("press", session_id, body.conversation_id)
         return {"accepted": True}
 
+    @app.post("/recording/hands-free", status_code=202)
+    async def hands_free(body: PressRequest, session_id=Depends(require_owner)):
+        submit("hands-free", session_id, body.conversation_id)
+        return {"accepted": True}
+
     @app.post("/recording/release", status_code=202)
     async def release(session_id=Depends(require_owner)):
         submit("release", session_id)

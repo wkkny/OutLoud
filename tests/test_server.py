@@ -205,6 +205,43 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("session_id", transcript)
             self.assertEqual(self.recorder.starts, 1)
 
+    def test_explicit_hands_free_is_idempotent_and_does_not_require_double_tap(self):
+        with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
+            headers = {**ORIGIN, "X-Session-ID": receive_type(websocket, "session.ready")["session_id"]}
+            for _ in range(2):
+                response = self.client.post("/recording/hands-free", headers=headers, json={"conversation_id": "chat-1"})
+                self.assertEqual(response.status_code, 202)
+            state = receive_type(websocket, "recording.state")
+            while not state["hands_free"]:
+                state = receive_type(websocket, "recording.state")
+            self.assertTrue(state["recording"])
+            self.client.post("/recording/stop", headers=headers)
+            self.assertEqual(receive_type(websocket, "transcription.completed")["conversation_id"], "chat-1")
+            self.assertEqual(self.recorder.starts, 1)
+
+    def test_explicit_hands_free_can_promote_a_hold_without_creating_another_recording(self):
+        with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
+            headers = {**ORIGIN, "X-Session-ID": receive_type(websocket, "session.ready")["session_id"]}
+            self.client.post("/recording/press", headers=headers, json={"conversation_id": "chat-1"})
+            state = receive_type(websocket, "recording.state")
+            while not state["recording"]:
+                state = receive_type(websocket, "recording.state")
+            self.client.post("/recording/hands-free", headers=headers, json={"conversation_id": "chat-2"})
+            state = receive_type(websocket, "recording.state")
+            while not state["hands_free"]:
+                state = receive_type(websocket, "recording.state")
+            self.assertEqual(state["conversation_id"], "chat-1")
+            self.client.post("/recording/release", headers=headers)
+            self.client.post("/recording/stop", headers=headers)
+            self.assertEqual(receive_type(websocket, "transcription.completed")["conversation_id"], "chat-1")
+            self.assertEqual(self.recorder.starts, 1)
+
+    def test_explicit_hands_free_requires_owner_and_conversation(self):
+        self.assertEqual(self.client.post("/recording/hands-free", headers=ORIGIN, json={"conversation_id": "chat-1"}).status_code, 403)
+        with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
+            headers = {**ORIGIN, "X-Session-ID": receive_type(websocket, "session.ready")["session_id"]}
+            self.assertEqual(self.client.post("/recording/hands-free", headers=headers, json={}).status_code, 422)
+
     def test_double_tap_keeps_one_hands_free_recording(self):
         with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
             headers = {**ORIGIN, "X-Session-ID": receive_type(websocket, "session.ready")["session_id"]}
@@ -247,8 +284,11 @@ class ServerTests(unittest.TestCase):
             while not state["recording"]:
                 state = receive_type(websocket, "recording.state")
         # Lifespan shutdown drains the disconnect command and transcription job.
+        # Simulate a lost release: closing the owner socket must invalidate late presses.
+        self.assertEqual(self.client.post("/recording/press", headers=headers, json={"conversation_id": "chat-1"}).status_code, 403)
         self.client.__exit__(None, None, None)
         self.client_closed = True
+        self.assertEqual(self.recorder.starts, 1)
         self.assertTrue((self.recorder.path.parent / "transcript.txt").exists())
 
 

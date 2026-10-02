@@ -28,6 +28,8 @@ use the same snapshot shape:
 
 - `revision`: increasing runtime-state revision; clients should ignore older revisions.
   Connection ownership (`ui_connected`) is added by the server, not tracked by this revision.
+- `pending_commands`: accepted controls not yet processed, including microphone startup
+  in progress. A disconnected UI can confirm a stop only after this reaches zero.
 - `recording`, `hands_free`, `mode`, `recording_id`, `conversation_id`: active recording.
   IDs and mode are null when idle.
 - `transcription`: status (`idle`, `queued`, `processing`, or `unavailable`),
@@ -48,7 +50,7 @@ not load models or probe microphone permissions. A recoverable microphone or
 transcription failure does not make the backend unready. Unexpected worker exits,
 including a worker returning without an exception, do.
 
-New presses return 503 when required workers are unavailable. Release/stop remain
+New presses and hands-free starts return 503 when required workers are unavailable. Release/stop remain
 available if only transcription has failed, so the microphone can still be finalized.
 Shutdown rejects new commands and marks intentional worker exits as stopped.
 Workers are not automatically restarted. Readiness detects exited workers, not
@@ -68,6 +70,7 @@ The first tab receives:
   "session_id": "<session-token>",
   "state": {
     "revision": 3,
+    "pending_commands": 0,
     "recording": false,
     "hands_free": false,
     "mode": null,
@@ -99,6 +102,7 @@ a new token. Transcripts from the old session are not delivered to the new owner
 | GET | `/ready` | Worker readiness; 503 when unavailable |
 | GET | `/state` | Recording, transcription, errors, workers, and connection snapshot |
 | POST | `/recording/press` | Button down; body: `{"conversation_id":"chat-1"}` |
+| POST | `/recording/hands-free` | Direct hands-free start; same body as press |
 | POST | `/recording/release` | Button up |
 | POST | `/recording/stop` | Explicit stop, including pointer cancellation |
 
@@ -111,8 +115,21 @@ Press/release gestures use the existing 300 ms double-tap window. Duplicate pres
 are ignored. A double-tap continues one recording; a press during hands-free mode
 stops it. The conversation is fixed at the start of each recording.
 
+`/recording/hands-free` is independent of the double-tap window. Repeating it does
+not create another stream. It can promote an existing hold to hands-free while
+preserving the recording and its original conversation. Release is then ignored;
+use stop or a new press to finish.
+
 Send requests in order. If a pointer is canceled or the page loses the ability to
 receive its release event, send `/recording/stop` rather than leaving a hold active.
+
+If a command fails with an uncertain outcome, close the owner WebSocket. Its token
+is invalidated and a final stop is enqueued after all already accepted commands.
+Poll uncached `/state` to confirm `ui_connected` is false, `recording` is false,
+`pending_commands` is zero, and the recording worker has not failed. This also covers
+a press still inside microphone startup when the connection closes. If the backend
+cannot confirm these conditions, report the stop as unconfirmed; do not silently
+start another session.
 
 ## WebSocket events
 

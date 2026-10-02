@@ -42,6 +42,7 @@ class RecordingRuntime:
         self.threads = {}
         self.shutting_down = False
         self.revision = 0
+        self.pending_commands = 0
 
     def worker_running(self, name):
         thread = self.threads.get(name)
@@ -66,6 +67,7 @@ class RecordingRuntime:
             )
             return copy.deepcopy({
                 "revision": self.revision,
+                "pending_commands": self.pending_commands,
                 **self.recording,
                 "mode": "hands_free" if self.recording["hands_free"] else
                         "hold" if self.recording["recording"] else None,
@@ -105,7 +107,9 @@ class RecordingRuntime:
     def publish(self, event):
         with self.lock:
             event_type = event["type"]
-            if event_type == "recording.state":
+            if event_type == "recording.command_completed":
+                self.pending_commands = max(0, self.pending_commands - 1)
+            elif event_type == "recording.state":
                 self.recording = {key: event.get(key) for key in self.recording}
             elif event_type == "transcription.queued":
                 self.queued_jobs.append(self.job_metadata(event))
@@ -119,7 +123,8 @@ class RecordingRuntime:
                     self.remember_error("transcription", event)
             elif event_type == "recording.error":
                 self.remember_error("recording", event)
-            self.notify(event)
+            if event_type != "recording.command_completed":
+                self.notify(event)
             self.state_changed()
 
     def run_worker(self, name, target, args, started):
@@ -180,12 +185,14 @@ class RecordingRuntime:
             required = ("recording",) if action in ("release", "stop") else tuple(self.workers)
             if self.shutting_down or not all(self.worker_running(name) for name in required):
                 raise RuntimeUnavailable("Required workers are unavailable; restart the backend")
+            self.pending_commands += 1
             self.events.put({
                 "action": action,
                 "timestamp": time.monotonic(),
                 "session_id": session_id,
                 "conversation_id": conversation_id,
             })
+            self.state_changed()
 
     def stop_recording(self, session_id):
         try:

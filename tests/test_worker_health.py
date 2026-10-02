@@ -130,6 +130,55 @@ class WorkerHealthTests(unittest.TestCase):
         runtime.stop_recording("disconnected-session")
         runtime.stop()
 
+    def test_pending_commands_include_in_progress_start_until_disconnect_stop_finishes(self):
+        starting = threading.Event()
+        finish_start = threading.Event()
+        watch = threading.Event()
+        drained = threading.Event()
+
+        def start():
+            starting.set()
+            if not finish_start.wait(3):
+                raise RuntimeError("test start timed out")
+
+        def transcribe(recordings, publish):
+            while True:
+                job = recordings.get()
+                if job is None:
+                    return
+                context = {"recording_id": job.path.parent.name, "conversation_id": job.conversation_id}
+                publish({"type": "transcription.started", **context})
+                publish({"type": "transcription.completed", "text": "", **context})
+
+        def observe(event):
+            if watch.is_set() and event["type"] == "state.updated" and event["state"]["pending_commands"] == 0:
+                drained.set()
+
+        recorder = MagicMock()
+        recorder.path = Path("recordings/recording-1/audio.wav")
+        recorder.start.side_effect = start
+        recorder.stop.return_value = recorder.path
+        runtime = RecordingRuntime(observe, recorder, transcription_target=transcribe)
+        runtime.start()
+        try:
+            runtime.command("press", "session", "chat-1")
+            self.assertTrue(starting.wait(3))
+            state = runtime.snapshot()
+            self.assertFalse(state["recording"])
+            self.assertEqual(state["pending_commands"], 1)
+            runtime.stop_recording("session")
+            self.assertEqual(runtime.snapshot()["pending_commands"], 2)
+            watch.set()
+            finish_start.set()
+            self.assertTrue(drained.wait(3))
+            state = runtime.snapshot()
+            self.assertEqual(state["pending_commands"], 0)
+            self.assertFalse(state["recording"])
+            recorder.stop.assert_called_once()
+        finally:
+            finish_start.set()
+            runtime.stop()
+
     def test_snapshot_cannot_mutate_runtime_state(self):
         runtime = RecordingRuntime(lambda event: None)
         runtime.start()
