@@ -9,6 +9,7 @@ export const CONVERSATION_ID = 'local-draft'
 
 type Connection = 'connecting' | 'connected' | 'disconnected' | 'in-use'
 type Action = 'press' | 'release' | 'stop' | 'hands-free'
+type BackendCommand = { action: Action } | { action: 'fn'; enabled: boolean }
 type Safety = 'none' | 'stopping' | 'stopped' | 'unconfirmed'
 
 export function useDictation() {
@@ -143,7 +144,8 @@ export function useDictation() {
     }
   }, [attempt, recover])
 
-  const command = useCallback((action: Action) => {
+  const sendCommand = useCallback((request: BackendCommand) => {
+    const action = request.action
     const token = session.current
     if (!token || recovering.current) return Promise.resolve(false)
     setPendingCommands((count) => count + 1)
@@ -152,10 +154,12 @@ export function useDictation() {
       const controller = new AbortController()
       activeRequest.current = controller
       try {
-        const response = await fetch(`${HTTP_URL}/recording/${action}`, {
+        const response = await fetch(`${HTTP_URL}${action === 'fn' ? '/shortcuts/fn' : `/recording/${action}`}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Session-ID': token },
-          body: action === 'press' || action === 'hands-free' ? JSON.stringify({ conversation_id: CONVERSATION_ID }) : undefined,
+          body: request.action === 'fn'
+            ? JSON.stringify({ enabled: request.enabled, conversation_id: CONVERSATION_ID })
+            : action === 'press' || action === 'hands-free' ? JSON.stringify({ conversation_id: CONVERSATION_ID }) : undefined,
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
         })
         if (session.current !== token || recovering.current) return false
@@ -180,7 +184,9 @@ export function useDictation() {
     return task
   }, [recover])
 
+  const command = useCallback((action: Action) => sendCommand({ action }), [sendCommand])
   const handsFree = useCallback(() => command('hands-free'), [command])
+  const setFnEnabled = useCallback((enabled: boolean) => sendCommand({ action: 'fn', enabled }), [sendCommand])
 
   const reconnect = async () => {
     if (safety === 'stopping') return
@@ -216,6 +222,7 @@ export function useDictation() {
     safety,
     command,
     handsFree,
+    setFnEnabled,
     reconnect,
     dismissError: () => setError(null),
   }

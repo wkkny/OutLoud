@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from .app import recording_worker
+from .fn_shortcut import FnShortcut
 from .transcription import transcription_worker
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ class RuntimeUnavailable(RuntimeError):
 class RecordingRuntime:
     """Own workers and publish atomic, metadata-only state snapshots."""
 
-    def __init__(self, on_event, recorder=None, *, recording_target=None, transcription_target=None):
+    def __init__(self, on_event, recorder=None, *, recording_target=None, transcription_target=None, fn_listener_factory=None):
         self.on_event = on_event
         self.recorder = recorder
         self.recording_target = recording_target or recording_worker
@@ -43,6 +44,8 @@ class RecordingRuntime:
         self.shutting_down = False
         self.revision = 0
         self.pending_commands = 0
+        self.owner_session_id = None
+        self.fn_shortcut = FnShortcut(self, fn_listener_factory)
 
     def worker_running(self, name):
         thread = self.threads.get(name)
@@ -68,6 +71,7 @@ class RecordingRuntime:
             return copy.deepcopy({
                 "revision": self.revision,
                 "pending_commands": self.pending_commands,
+                "fn_shortcut": self.fn_shortcut.state,
                 **self.recording,
                 "mode": "hands_free" if self.recording["hands_free"] else
                         "hold" if self.recording["recording"] else None,
@@ -150,6 +154,10 @@ class RecordingRuntime:
                     if failure is None:
                         logger.error("%s worker returned unexpectedly", name)
                 self.workers[name] = {"status": "failed" if unexpected else "stopped", "error": error}
+                if unexpected and self.fn_shortcut.state["status"] in ("starting", "enabled"):
+                    session_id = self.owner_session_id
+                    self.fn_shortcut.disable("Recording workers are unavailable. Restart the backend.")
+                    self.stop_recording(session_id)
                 if name == "recording":
                     self.recording = {
                         "recording": False, "hands_free": False,
@@ -179,7 +187,28 @@ class RecordingRuntime:
         for event in started.values():
             event.wait()
 
-    def command(self, action, session_id, conversation_id=None):
+    def claim_owner(self, session_id):
+        with self.lock:
+            self.owner_session_id = session_id
+            self.fn_shortcut.disable()
+
+    def release_owner(self, session_id):
+        with self.lock:
+            if self.owner_session_id != session_id:
+                return
+            self.owner_session_id = None
+            self.fn_shortcut.disable()
+            self.stop_recording(session_id)
+
+    def configure_fn(self, session_id, enabled, conversation_id):
+        with self.lock:
+            if self.owner_session_id != session_id:
+                raise RuntimeUnavailable("An active owner session is required")
+            if enabled and not self.readiness()["ready"]:
+                raise RuntimeUnavailable("Required workers are unavailable; restart the backend")
+            self.fn_shortcut.configure(enabled, session_id, conversation_id)
+
+    def command(self, action, session_id, conversation_id=None, *, timestamp=None, source="ui"):
         with self.lock:
             # Release/stop remain available if transcription fails, so audio can be finalized.
             required = ("recording",) if action in ("release", "stop") else tuple(self.workers)
@@ -188,7 +217,8 @@ class RecordingRuntime:
             self.pending_commands += 1
             self.events.put({
                 "action": action,
-                "timestamp": time.monotonic(),
+                "timestamp": time.monotonic() if timestamp is None else timestamp,
+                "source": source,
                 "session_id": session_id,
                 "conversation_id": conversation_id,
             })
@@ -206,8 +236,10 @@ class RecordingRuntime:
             if self.shutting_down:
                 return
             self.shutting_down = True
-            self.state_changed()
+            self.owner_session_id = None
+            self.fn_shortcut.disable()
             self.events.put(None)
+        self.fn_shortcut.join()
         self.threads["recording"].join()
         self.recordings.put(None)
         self.threads["transcription"].join()

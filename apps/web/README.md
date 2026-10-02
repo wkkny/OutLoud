@@ -25,8 +25,14 @@ that origin. Run only one backend instance.
 - Double-tap for hands-free recording, then tap to stop.
 - **Record hands-free** uses a direct backend command, independent of tap timing.
 - When the main button is focused, Space/Enter work as hold-to-record keys.
-- **Stop** also ends recording. Pointer cancellation or focus loss during a hold
+- **Stop** also ends recording. Pointer cancellation or focus loss during an on-screen hold
   requests a stop.
+- **Enable Fn shortcut** opts this owner session into macOS Fn/Globe capture. Hold
+  to record, double-tap for hands-free, and tap to stop. The same controls show its state.
+- Fn capture works across apps while this tab is connected, not just while it has
+  focus. Turning it off stops recording and restores the default Fn action.
+- Keyboard permission failures appear next to the toggle and do not disable the
+  on-screen controls. See the [root README](../../README.md#fnglobe-shortcut) for permissions.
 - Transcripts append to the editable composer without replacing typed text.
 - Only one tab owns the recording session. Close it before reconnecting another.
 - If the backend disconnects, the composer remains usable. Use **Reconnect** after
@@ -64,8 +70,9 @@ completed during this safety disconnect are not replayed into the composer yet.
 
 ## Current limits
 
-Send is disabled until Ollama chat is added. Fn is not connected to the browser UI.
-Drafts are kept only in memory and disappear on reload. Manual reconnect does not
+Send is disabled until Ollama chat is added. Fn capture is off by default and
+resets on disconnect, reload, or backend restart. Drafts are kept only in memory
+and disappear on reload. Manual reconnect does not
 replay transcripts completed while disconnected; saved recordings remain on disk.
 
 Physical double-taps still use the backend's 300 ms window; the dedicated hands-free

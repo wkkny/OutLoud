@@ -17,7 +17,10 @@ recorder has been removed. `uv run python -m outloud` also starts this backend.
 
 - `server.py`: FastAPI routes, origin/host checks, session ownership, and WebSockets.
 - `runtime.py`: queues, worker supervision, readiness, and atomic state snapshots.
-- `app.py`: shared recording worker and hold/double-tap controls.
+- `app.py`: shared recording worker and hold/double-tap controls, with independent
+  Fn and on-screen hold sources.
+- `fn_shortcut.py`: owner-scoped capture lifecycle and stale-callback rejection.
+- `shortcuts.py`: gesture state machine and the native macOS Fn event tap.
 - `transcription.py`: shared Whisper worker, transcript events, and latency metrics.
 
 Recording and transcription run on separate threads. HTTP handlers enqueue commands
@@ -31,6 +34,8 @@ use the same snapshot shape:
 
 - `revision`: increasing runtime-state revision; clients should ignore older revisions.
   Connection ownership (`ui_connected`) is added by the server, not tracked by this revision.
+- `fn_shortcut`: `status` (`disabled`, `starting`, `enabled`, or `failed`) and a safe
+  nullable `error`. Optional keyboard capture does not affect worker readiness.
 - `pending_commands`: accepted controls not yet processed, including microphone startup
   in progress. A disconnected UI can confirm a stop only after this reaches zero.
 - `recording`, `hands_free`, `mode`, `recording_id`, `conversation_id`: active recording.
@@ -74,6 +79,7 @@ The first tab receives:
   "state": {
     "revision": 3,
     "pending_commands": 0,
+    "fn_shortcut": {"status": "disabled", "error": null},
     "recording": false,
     "hands_free": false,
     "mode": null,
@@ -108,6 +114,7 @@ a new token. Transcripts from the old session are not delivered to the new owner
 | POST | `/recording/hands-free` | Direct hands-free start; same body as press |
 | POST | `/recording/release` | Button up |
 | POST | `/recording/stop` | Explicit stop, including pointer cancellation |
+| POST | `/shortcuts/fn` | Enable/disable owner-scoped Fn capture; body: `{"enabled":true,"conversation_id":"chat-1"}` |
 
 Recording routes require the owner token and return **202 Accepted**, not a promise
 that microphone startup succeeded. Observe WebSocket events for the actual result.
@@ -133,6 +140,34 @@ Poll uncached `/state` to confirm `ui_connected` is false, `recording` is false,
 a press still inside microphone startup when the connection closes. If the backend
 cannot confirm these conditions, report the stop as unconfirmed; do not silently
 start another session.
+
+## Fn capture
+
+`POST /shortcuts/fn` requires the same owner token and returns 202. Native tap
+installation runs on a separate thread; observe `fn_shortcut` in state snapshots
+for actual success or a permission failure. The conversation ID is required for
+both enabling and disabling. Fn is disabled for every new owner session.
+
+Only Fn key modifier events are suppressed, and only while capture is enabled
+for the current owner and required workers are available. Other modifier/key
+events pass through. Enabling while Fn is held requires releasing it and making
+a fresh press. macOS keyboard preferences are never changed.
+
+Fn commands carry their event timestamp and enter the same recording queue as
+HTTP controls. Overlapping Fn and on-screen holds do not restart the microphone
+or release each other. A fresh press from either source stops hands-free even
+while the other source's second tap is still held. Duplicate stop presses and
+late releases do not restart audio. A recording keeps its original conversation
+even if another control supplies a different ID.
+
+Disable, owner disconnect, shutdown, worker failure, and event-tap loss invalidate
+capture before any later callback can enqueue a command. Disabling an active or
+starting shortcut queues a stop after earlier accepted commands. Native capture
+loss also stops recording; a startup permission failure leaves existing on-screen
+recording alone. Capture-thread exits (including `SystemExit`) are supervised.
+A finished or stopped native run loop exits capture rather than spinning without
+a keyboard source. Capture is not automatically retried. See the
+[root README](README.md#fnglobe-shortcut) for permissions.
 
 ## WebSocket events
 
@@ -167,7 +202,6 @@ programs or users on the same machine. Do not expose the server to a network.
 Not implemented in this step:
 
 - Ollama chat and conversation persistence.
-- Backend Fn interception or the UI toggle. The backend never captures Fn yet.
 - Transcript replay/deduplication after reconnect. Files remain saved on disk.
 - A bounded transcription queue or chunked long-recording transcription.
 
@@ -184,5 +218,7 @@ curl http://127.0.0.1:8765/ready
 curl http://127.0.0.1:8765/state
 ```
 
-Tests exercise HTTP and WebSocket behavior using a simulated recorder and model;
-they do not request microphone permission or download Whisper models.
+Tests exercise HTTP and WebSocket behavior using simulated recording, models,
+and keyboard capture. Native event-tap calls are mocked; tests do not request
+microphone or keyboard permissions or download Whisper models. Physical Fn/Globe
+behavior and suppression of the macOS default action need a manual check on a Mac.

@@ -246,6 +246,103 @@ describe('voice-first UI', () => {
     expect(screen.getByText('Microphone permission denied.')).toBeInTheDocument()
   })
 
+  it('keeps Fn off by default and enables it only through the owner endpoint', async () => {
+    render(<App />)
+    const toggle = screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })
+    expect(toggle).not.toBeChecked()
+    expect(toggle).toBeDisabled()
+    connect()
+    expect(toggle).toBeEnabled()
+    await userEvent.click(toggle)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8765/shortcuts/fn')
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: { 'X-Session-ID': 'test-session' },
+      body: JSON.stringify({ enabled: true, conversation_id: 'local-draft' }),
+    })
+    // HTTP acceptance is not confirmation that the native listener started.
+    expect(toggle).not.toBeChecked()
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, fn_shortcut: { status: 'starting', error: null } } }))
+    expect(toggle).toBeChecked()
+    expect(screen.getByText(/Enabling keyboard capture/)).toBeInTheDocument()
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 3, fn_shortcut: { status: 'enabled', error: null } } }))
+    expect(toggle).toBeChecked()
+    await waitFor(() => expect(toggle).toBeEnabled())
+    await userEvent.click(toggle)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({ enabled: false, conversation_id: 'local-draft' }))
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 4 } }))
+    expect(toggle).not.toBeChecked()
+  })
+
+  it('shows Fn permission errors without disabling on-screen recording or losing text', () => {
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my draft' } })
+    act(() => socket().emit({
+      type: 'state.updated',
+      state: { ...initialState, revision: 2, fn_shortcut: { status: 'failed', error: 'Allow Accessibility for your terminal, then restart the backend.' } },
+    }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Allow Accessibility')
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my draft')
+  })
+
+  it('reflects Fn recording in the same controls and stops it from the UI', async () => {
+    render(<App />)
+    connect()
+    act(() => socket().emit({
+      type: 'state.updated',
+      state: { ...initialState, revision: 2, recording: true, hands_free: true, recording_id: 'fn-recording', fn_shortcut: { status: 'enabled', error: null } },
+    }))
+    expect(screen.getByRole('button', { name: 'Stop recording' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    await waitFor(() => expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8765/recording/stop'))
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 3, fn_shortcut: { status: 'enabled', error: null } } }))
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeChecked()
+  })
+
+  it('resets Fn on reconnect without automatically opting the new session in', async () => {
+    render(<App />)
+    connect()
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, fn_shortcut: { status: 'enabled', error: null } } }))
+    act(() => socket().close())
+    await screen.findByText('Backend confirmed recording stopped')
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    act(() => socket().emit({ type: 'session.ready', session_id: 'new-session', state: initialState }))
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
+    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(0)
+  })
+
+  it('allows disabling Fn during microphone startup', async () => {
+    render(<App />)
+    connect()
+    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, pending_commands: 1, fn_shortcut: { status: 'enabled', error: null } } }))
+    const toggle = screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })
+    expect(toggle).toBeEnabled()
+    await userEvent.click(toggle)
+    await waitFor(() => expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({ enabled: false, conversation_id: 'local-draft' })))
+  })
+
+  it('closes the owner session if a shortcut command fails', async () => {
+    fetchMock.mockImplementation(async (url, init) => init?.method === 'POST'
+      ? new Response(null, { status: 403 })
+      : defaultFetch(url, init))
+    render(<App />)
+    connect()
+    const owner = socket()
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' }))
+    await screen.findByText('Backend confirmed recording stopped')
+    expect(owner.closed).toBe(true)
+    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeDisabled()
+  })
+
   it('explains when another tab owns the session', () => {
     render(<App />)
     act(() => socket().onclose?.({ code: 1008 }))

@@ -10,7 +10,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
     recorder = recorder if recorder is not None else Recorder()
     context = {"conversation_id": None, "session_id": None}
     last_state = None
-    pressed = False
+    pressed_sources = set()
     recording_id = None
 
     def notify(event):
@@ -82,10 +82,10 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
                 elif isinstance(event, dict):
                     action = event["action"]
                     if action == "stop":
-                        pressed = False
+                        pressed_sources.clear()
                         controls.stop()
                     elif action == "hands-free":
-                        pressed = False
+                        pressed_sources.clear()
                         controls.tick(event["timestamp"])
                         if not controls.recording:
                             context = {
@@ -94,10 +94,23 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
                             }
                         controls.start_hands_free(event["timestamp"])
                     else:
-                        is_pressed = action == "press"
-                        if is_pressed != pressed:
+                        source = event.get("source", "ui")
+                        was_pressed = bool(pressed_sources)
+                        fresh_press = action == "press" and source not in pressed_sources
+                        if action == "press":
+                            pressed_sources.add(source)
+                        else:
+                            pressed_sources.discard(source)
+                        pressed = bool(pressed_sources)
+                        if fresh_press and controls.hands_free:
+                            # Either control can stop hands-free, even if another
+                            # source still holds the second tap. Retain the stop
+                            # press until release so a duplicate cannot restart.
+                            pressed_sources.clear()
+                            pressed_sources.add(source)
+                            controls.stop()
+                        elif pressed != was_pressed:
                             controls.tick(event["timestamp"])
-                            pressed = is_pressed
                             if pressed and not controls.recording:
                                 context = {
                                     "conversation_id": event["conversation_id"],
@@ -109,7 +122,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
                     controls.handle(pressed, timestamp)
             except Exception as error:
                 if isinstance(event, dict) and event["action"] in ("release", "stop"):
-                    pressed = False
+                    pressed_sources.clear()
                 recover(error)
             publish_state()
             if isinstance(event, dict):

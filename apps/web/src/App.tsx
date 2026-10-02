@@ -9,7 +9,7 @@ import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
 
 export default function App() {
-  const { connection, snapshot, transcripts, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, reconnect, dismissError } = useDictation()
+  const { connection, snapshot, transcripts, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, setFnEnabled, reconnect, dismissError } = useDictation()
   const [draft, setDraft] = useState('')
   const consumed = useRef(0)
   const press = useCallback(() => command('press'), [command])
@@ -31,6 +31,8 @@ export default function App() {
   const controlsPending = pendingCommands > 0 || (snapshot?.pending_commands ?? 0) > 0
   const enabled = connected && safety === 'none' && (snapshot?.ready ?? false)
   const canStop = connected && safety === 'none' && (recording || controlsPending)
+  const fnStatus = snapshot?.fn_shortcut.status ?? 'disabled'
+  const fnEnabled = fnStatus === 'enabled' || fnStatus === 'starting'
   const status = recording ? 'Recording' : controlsPending ? 'Applying controls…' : processing ? 'Transcribing' : queued ? 'Queued' : enabled ? 'Ready' : 'Not ready'
 
   return (
@@ -117,6 +119,24 @@ export default function App() {
               <RecordingControl enabled={enabled} recording={recording} handsFree={snapshot?.hands_free ?? false} pending={controlsPending} canStop={canStop} press={press} release={release} stop={stop} startHandsFree={handsFree} />
             </div>
             <div className="border-t pt-5">
+              <label className="flex w-fit items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-primary"
+                  checked={fnEnabled}
+                  disabled={!connected || safety !== 'none' || pendingCommands > 0 || (!snapshot?.ready && !fnEnabled)}
+                  onChange={(event) => void setFnEnabled(event.target.checked)}
+                  aria-describedby="fn-help"
+                />
+                Enable Fn shortcut
+              </label>
+              <p id="fn-help" className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                {fnStatus === 'starting' ? 'Enabling keyboard capture…' : 'Hold Fn/Globe to record; double-tap for hands-free, then tap to stop.'}
+                {' '}While enabled, Fn is captured across apps while this tab stays connected. Turning it off stops recording and restores its default action.
+              </p>
+              {snapshot?.fn_shortcut.error && <p role="alert" className="mt-2 text-xs leading-relaxed text-destructive">{snapshot.fn_shortcut.error}</p>}
+            </div>
+            <div className="border-t pt-5">
               <label htmlFor="composer" className="text-sm font-medium">Your text</label>
               <Textarea
                 id="composer"
@@ -134,7 +154,7 @@ export default function App() {
         </Card>
         <footer className="flex flex-col gap-1 text-xs leading-relaxed text-muted-foreground">
           <p>Audio and transcripts stay on this Mac. Transcription uses Whisper base.</p>
-          <p>Fn shortcut and local Gemma chat are not connected to this UI yet.</p>
+          <p>Local Gemma chat is not connected yet. Fn capture is off by default and resets on reconnect.</p>
         </footer>
       </main>
     </div>

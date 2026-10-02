@@ -24,6 +24,10 @@ class PressRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=128)
 
 
+class FnRequest(PressRequest):
+    enabled: bool = Field(strict=True)
+
+
 class OwnerConnection:
     def __init__(self, session_id, websocket):
         self.session_id = session_id
@@ -158,6 +162,14 @@ def create_app(runtime_factory=RecordingRuntime):
         submit("stop", session_id)
         return {"accepted": True}
 
+    @app.post("/shortcuts/fn", status_code=202)
+    async def configure_fn(body: FnRequest, session_id=Depends(require_owner)):
+        try:
+            app.state.runtime.configure_fn(session_id, body.enabled, body.conversation_id)
+        except RuntimeUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"accepted": True}
+
     @app.websocket("/events")
     async def events(websocket: WebSocket):
         nonlocal owner
@@ -171,6 +183,7 @@ def create_app(runtime_factory=RecordingRuntime):
             await websocket.accept()
             connection = OwnerConnection(secrets.token_urlsafe(32), websocket)
             owner = connection
+            app.state.runtime.claim_owner(connection.session_id)
         tasks = []
         try:
             await websocket.send_json({
@@ -196,7 +209,7 @@ def create_app(runtime_factory=RecordingRuntime):
                 async with owner_lock:
                     if owner is connection:
                         # Enqueued before a new owner can issue commands.
-                        app.state.runtime.stop_recording(connection.session_id)
+                        app.state.runtime.release_owner(connection.session_id)
                         owner = None
 
     return app

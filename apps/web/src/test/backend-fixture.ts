@@ -3,6 +3,7 @@ import type { Snapshot } from '@/lib/protocol'
 export const initialState: Snapshot = {
   revision: 1,
   pending_commands: 0,
+  fn_shortcut: { status: 'disabled', error: null },
   recording: false,
   hands_free: false,
   recording_id: null,

@@ -20,6 +20,10 @@ const workerSchema = z.object({
 export const snapshotSchema = z.object({
   revision: z.number(),
   pending_commands: z.number().int().nonnegative(),
+  fn_shortcut: z.object({
+    status: z.enum(['disabled', 'starting', 'enabled', 'failed']),
+    error: z.string().nullable(),
+  }),
   recording: z.boolean(),
   hands_free: z.boolean(),
   recording_id: z.string().nullable(),

@@ -43,6 +43,28 @@ Hold the recording button and release to stop, or choose **Record hands-free**
 and then **Stop**. Transcripts append without replacing typed text. Only one
 browser tab can own the recording session.
 
+## Fn/Globe shortcut
+
+In the UI, check **Enable Fn shortcut**. Capture is off by default and only works
+while this tab owns a connected backend session:
+
+- Hold Fn/Globe to record; release to stop.
+- Double-tap for one uninterrupted hands-free recording; tap again to stop.
+- The on-screen controls show the same recording state and can stop Fn recordings.
+
+While enabled, capture works across apps, even with the browser in the background.
+OutLoud suppresses the captured Fn key's default action without changing macOS
+keyboard preferences. Turning the toggle off or disconnecting the owner tab stops
+recording and releases capture. Reconnects require opting in again.
+
+Keyboard capture needs macOS **Accessibility** permission for the terminal or app
+launching the backend, and **Input Monitoring** if macOS requests it. Set these in
+**System Settings → Privacy & Security**. Restart the backend (and quit/reopen the
+terminal if macOS asks), reconnect, then enable the toggle again. Permission errors
+appear next to the toggle; on-screen recording still works without keyboard access.
+If macOS disables the event tap, OutLoud stops recording and asks you to re-enable
+capture rather than silently resuming it.
+
 ## Commands
 
 Run these from the repository root:
@@ -121,8 +143,8 @@ Audio is retained when transcription fails. Recordings, dependencies, generated
 web output, and Turbo caches are excluded from Git. Whisper's model cache lives
 outside the repository.
 
-Send is disabled until chat is connected. Fn interception is not active. Drafts
-and transcript deduplication are held in page memory, and transcripts completed
+Send is disabled until chat is connected. Drafts and transcript deduplication
+are held in page memory, and transcripts completed
 while disconnected are not replayed after reconnect. The transcription queue is
 not bounded yet. Backend shutdown drains saved transcription jobs and can wait
 for Whisper; it has no deadline. Do not expose the loopback backend to a network.
