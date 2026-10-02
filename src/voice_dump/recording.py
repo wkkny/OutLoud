@@ -10,10 +10,10 @@ SAMPLE_RATE = 16000
 
 class Recorder:
     def start(self):
-        folder = Path("recordings")
-        folder.mkdir(exist_ok=True)
         name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.path = folder / f"{name}_{uuid.uuid4().hex[:8]}.wav"
+        folder = Path("recordings") / f"{name}_{uuid.uuid4().hex[:8]}"
+        folder.mkdir(parents=True)
+        self.path = folder / "audio.wav"
         self.audio_file = wave.open(str(self.path), "wb")
         self.audio_file.setnchannels(1)
         self.audio_file.setsampwidth(2)

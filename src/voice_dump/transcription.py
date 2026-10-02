@@ -14,9 +14,9 @@ def transcription_worker(recordings):
             print(f"Transcribing: {path}", flush=True)
             result = model.transcribe(str(path), fp16=False)
             text = result["text"].strip()
-            transcript_path = path.with_suffix(".txt")
+            transcript_path = path.parent / "transcript.txt"
             transcript_path.write_text(text + "\n", encoding="utf-8")
-            print(f"\nTranscript ({path.name}):\n{text}\n", flush=True)
+            print(f"\nTranscript ({path.parent.name}):\n{text}\n", flush=True)
             print(f"Transcript saved: {transcript_path}", flush=True)
         except Exception as error:
             print(
