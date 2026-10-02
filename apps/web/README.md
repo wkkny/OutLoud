@@ -41,7 +41,8 @@ that origin. Run only one backend instance.
 Recording uses the microphone on the Mac running Python, not the browser's microphone.
 Grant the terminal microphone permission if macOS requests it.
 
-The UI shows recording/transcription status, queue count, connection status, pending
+The UI shows recording/transcription status, queue count, transcription slot usage,
+connection status, pending
 controls, and errors. Commands are sent in order and state revisions prevent older
 snapshots from replacing newer ones. Duplicate transcript IDs are ignored within
 this page session.
@@ -80,17 +81,32 @@ microphone startup for a completed stop. Retry is blocked during these checks.
 If confirmation fails, the UI says the stop is unconfirmed rather than claiming
 success. Check or restart the backend; **Reconnect** checks safety again before
 opening a new session. Recordings/transcripts are still saved. Results completed
-during this safety disconnect replay after reconnect while the backend remains
-running.
+during this safety disconnect replay after reconnect, including after a backend
+restart.
 
 ## Current limits
 
 Send is disabled until Ollama chat is added. Fn capture is off by default and
 resets on disconnect, reload, or backend restart. Drafts are kept only in memory
-and disappear on reload. The backend's replay and acknowledgement index is also
-in memory and resets on backend restart. Acknowledgement is not durable draft
-persistence; already-acknowledged text is not restored to a reloaded page. Saved
-recordings remain on disk.
+and disappear on reload. The backend's delivery index is stored in SQLite and
+survives backend restart; replay reads small batches rather than holding the
+backlog in memory. The backend sends at most 16 unacknowledged results at once,
+and the browser keeps at most 16 acknowledgement requests in flight, including
+reconnect retries. Confirmations advance both windows; slow storage does not
+block heartbeat processing. Acknowledgement is not durable draft persistence;
+already-acknowledged text is not restored to a reloaded page. Saved recordings
+remain on disk. Neither recording files nor delivery markers are automatically
+pruned.
+
+## Full transcription capacity
+
+The default 3 slots include the active job, queued audio, and the current
+recording. The UI blocks new starts when full but retains Stop/release, including
+a held pointer while its pending start reserves the last slot. HTTP 429 and
+`recording.rejected` show a capacity message without disconnecting or discarding
+the draft. Fn interception remains enabled; a fresh press can stop hands-free at
+capacity. Capacity reopens after a job finishes or fails. Backend configuration
+uses `OUTLOUD_MAX_TRANSCRIPTIONS`, a positive integer.
 
 Physical double-taps still use the backend's 300 ms window; the dedicated hands-free
 action does not. Pointer capture plus window listeners handle outside releases.

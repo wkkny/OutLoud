@@ -1,4 +1,7 @@
 import asyncio
+import itertools
+import os
+from pathlib import Path
 import secrets
 import time
 from typing import Literal
@@ -13,6 +16,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .runtime import RecordingRuntime, RuntimeUnavailable
+from .capacity import CapacityUnavailable
 
 ALLOWED_ORIGINS = {
     "http://localhost:5173",
@@ -56,6 +60,9 @@ class OwnerConnection:
         self.active = True
         self.events = asyncio.Queue(maxsize=128)
         self.controls = asyncio.Queue(maxsize=128)
+        self.acknowledgements = asyncio.Queue(maxsize=128)
+        self.delivery_slots = asyncio.Semaphore(16)
+        self.in_flight = set()
         self.send_lock = asyncio.Lock()
         self.ready_sent = asyncio.Event()
 
@@ -89,7 +96,24 @@ class OwnerConnection:
                 "message": "Client could not keep up with events; reconnect.",
             })
 
+    def release_delivery(self, recording_id):
+        if recording_id in self.in_flight:
+            self.in_flight.remove(recording_id)
+            self.delivery_slots.release()
+
     async def send(self, event):
+        if event["type"] == "transcription.completed":
+            recording_id = event["recording_id"]
+            if recording_id in self.in_flight:
+                return
+            await self.delivery_slots.acquire()
+            self.in_flight.add(recording_id)
+            # Replay/live delivery can race an earlier acknowledgement. Register
+            # before the read so an intervening ack can release this credit.
+            pending = await asyncio.to_thread(self.inbox.is_pending, recording_id)
+            if not pending or not self.active or recording_id not in self.in_flight:
+                self.release_delivery(recording_id)
+                return
         async with self.send_lock:
             await self.websocket.send_json(event)
         # Keep receive/lease tasks responsive even if transport sends don't yield.
@@ -108,10 +132,15 @@ class OwnerConnection:
         self.ready_sent.set()
         # Stream replay directly: a backlog larger than the event queue must not
         # overflow it before the client can acknowledge anything.
-        for event in self.inbox.replay(self.conversation_id):
-            if not self.active:
-                return
-            await self.send(event)
+        replay = self.inbox.replay(self.conversation_id)
+        while self.active:
+            batch = await asyncio.to_thread(lambda: list(itertools.islice(replay, 16)))
+            if not batch:
+                break
+            for event in batch:
+                if not self.active:
+                    return
+                await self.send(event)
         while True:
             event = await self.events.get()
             await self.send(event)
@@ -127,6 +156,16 @@ class OwnerConnection:
                 await self.websocket.close(code=1001, reason="Owner heartbeat expired")
                 return
             await asyncio.sleep(min(remaining, 1))
+
+    async def process_acknowledgements(self):
+        while True:
+            parsed = await self.acknowledgements.get()
+            if await asyncio.to_thread(self.inbox.acknowledge, parsed.recording_id, parsed.conversation_id):
+                self.release_delivery(parsed.recording_id)
+                self.deliver({
+                    "type": "transcript.acknowledged", "recording_id": parsed.recording_id,
+                    "conversation_id": parsed.conversation_id,
+                })
 
     async def receive_messages(self):
         while True:
@@ -158,14 +197,23 @@ class OwnerConnection:
                     self.revoke(self)
                     await self.websocket.close(code=1003, reason="Wrong acknowledgement conversation")
                     return
-                if self.inbox.acknowledge(parsed.recording_id, parsed.conversation_id):
-                    self.deliver({
-                        "type": "transcript.acknowledged", "recording_id": parsed.recording_id,
-                        "conversation_id": parsed.conversation_id,
-                    })
+                try:
+                    self.acknowledgements.put_nowait(parsed)
+                except asyncio.QueueFull:
+                    self.revoke(self)
+                    await self.websocket.close(code=1013, reason="Acknowledgement backlog is full")
+                    return
 
 
-def create_app(runtime_factory=RecordingRuntime, *, owner_lease_seconds=90, clock=time.monotonic):
+def production_runtime(publish):
+    return RecordingRuntime(
+        publish, max_transcriptions=int(os.environ.get("OUTLOUD_MAX_TRANSCRIPTIONS", "3")),
+        delivery_path=Path("recordings/delivery.sqlite3"),
+    )
+
+
+def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic):
+    runtime_factory = runtime_factory or production_runtime
     owner = None
     loop = None
 
@@ -241,6 +289,8 @@ def create_app(runtime_factory=RecordingRuntime, *, owner_lease_seconds=90, cloc
     def submit(action, session_id, conversation_id=None):
         try:
             app.state.runtime.command(action, session_id, conversation_id)
+        except CapacityUnavailable as error:
+            raise HTTPException(status_code=429, detail=str(error)) from error
         except RuntimeUnavailable as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
@@ -314,6 +364,7 @@ def create_app(runtime_factory=RecordingRuntime, *, owner_lease_seconds=90, cloc
                 asyncio.create_task(connection.send_events(state_snapshot)),
                 asyncio.create_task(connection.send_controls()),
                 asyncio.create_task(connection.receive_messages()),
+                asyncio.create_task(connection.process_acknowledgements()),
                 asyncio.create_task(connection.watch_lease()),
             ]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

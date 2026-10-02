@@ -1,6 +1,7 @@
 import logging
 import threading
 
+from .capacity import CapacityUnavailable
 from .shortcuts import FnListener
 
 logger = logging.getLogger(__name__)
@@ -88,10 +89,16 @@ class FnShortcut:
             if not self.runtime.readiness()["ready"]:
                 self.fail(generation, "Recording workers are unavailable. Restart the backend.")
                 return False
-            self.runtime.command(
-                "press" if pressed else "release", self.session_id, self.conversation_id,
-                timestamp=timestamp, source="fn",
-            )
+            try:
+                self.runtime.command(
+                    "press" if pressed else "release", self.session_id, self.conversation_id,
+                    timestamp=timestamp, source="fn",
+                )
+            except CapacityUnavailable as error:
+                self.runtime.notify({
+                    "type": "recording.rejected", "message": str(error),
+                    "session_id": self.session_id, "conversation_id": self.conversation_id,
+                })
             return True
 
     def run(self, generation):

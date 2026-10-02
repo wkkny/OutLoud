@@ -39,6 +39,10 @@ export default function App() {
   const queued = snapshot?.transcription.queued_jobs.length ?? 0
   const controlsPending = pendingCommands > 0 || (snapshot?.pending_commands ?? 0) > 0
   const enabled = connected && safety === 'none' && (snapshot?.ready ?? false)
+  const capacityFull = snapshot?.capacity.available === 0
+  // A reservation can fill capacity before recording.state arrives. Do not
+  // clear a held pointer during that pending start: its release must still work.
+  const canStart = enabled && (!capacityFull || recording || controlsPending)
   const canStop = connected && safety === 'none' && (recording || controlsPending)
   const fnStatus = snapshot?.fn_shortcut.status ?? 'disabled'
   const fnEnabled = fnStatus === 'enabled' || fnStatus === 'starting'
@@ -121,11 +125,15 @@ export default function App() {
               </span>
               {queued > 0 && <span className="text-xs text-muted-foreground">{queued} queued</span>}
             </div>
+            {snapshot && <p className="text-xs text-muted-foreground">
+              {snapshot.capacity.used} of {snapshot.capacity.limit} transcription slots used (recording + queued + active).
+              {capacityFull && ' Capacity is full. Wait for a job to finish before starting another recording.'}
+            </p>}
             <div className="pb-3 pt-2">
               <p role="status" className="mb-3 h-4 text-center text-xs text-muted-foreground">
                 {controlsPending ? 'Sending recording controls…' : ''}
               </p>
-              <RecordingControl enabled={enabled} recording={recording} handsFree={snapshot?.hands_free ?? false} pending={controlsPending} canStop={canStop} press={press} release={release} stop={stop} startHandsFree={handsFree} />
+              <RecordingControl enabled={canStart} recording={recording} handsFree={snapshot?.hands_free ?? false} pending={controlsPending} canStop={canStop} press={press} release={release} stop={stop} startHandsFree={handsFree} />
             </div>
             <div className="border-t pt-5">
               <label className="flex w-fit items-center gap-2 text-sm font-medium">

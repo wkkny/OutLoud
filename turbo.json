@@ -6,7 +6,8 @@
   "tasks": {
     "dev": {
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": ["OUTLOUD_MAX_TRANSCRIPTIONS"]
     },
     "build": {
       "dependsOn": ["^build"],

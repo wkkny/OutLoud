@@ -40,8 +40,8 @@ class FakeRecorder:
         return self.path
 
 
-def receive_type(websocket, event_type):
-    for _ in range(20):
+def receive_type(websocket, event_type, max_events=20):
+    for _ in range(max_events):
         event = websocket.receive_json()
         if event["type"] == event_type:
             return event

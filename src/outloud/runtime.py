@@ -4,8 +4,10 @@ import queue
 import threading
 import time
 from datetime import datetime, timezone
+from functools import partial
 
 from .app import recording_worker
+from .capacity import CapacityUnavailable
 from .delivery import TranscriptInbox
 from .fn_shortcut import FnShortcut
 from .transcription import transcription_worker
@@ -20,10 +22,17 @@ class RuntimeUnavailable(RuntimeError):
 class RecordingRuntime:
     """Own workers and publish atomic, metadata-only state snapshots."""
 
-    def __init__(self, on_event, recorder=None, *, recording_target=None, transcription_target=None, fn_listener_factory=None):
+    def __init__(self, on_event, recorder=None, *, recording_target=None, transcription_target=None, fn_listener_factory=None, max_transcriptions=3, delivery_path=None):
         self.on_event = on_event
         self.recorder = recorder
-        self.recording_target = recording_target or recording_worker
+        if type(max_transcriptions) is not int or max_transcriptions < 1:
+            raise ValueError("max_transcriptions must be a positive integer")
+        self.max_transcriptions = max_transcriptions
+        self.recording_reserved = False
+        self.outstanding_jobs = set()
+        self.recording_target = recording_target or partial(
+            recording_worker, reserve=self.reserve_recording, release=self.release_recording,
+        )
         self.transcription_target = transcription_target or transcription_worker
         self.events = queue.Queue()
         self.recordings = queue.Queue()
@@ -47,7 +56,7 @@ class RecordingRuntime:
         self.pending_commands = 0
         self.owner_session_id = None
         self.fn_shortcut = FnShortcut(self, fn_listener_factory)
-        self.transcripts = TranscriptInbox()
+        self.transcripts = TranscriptInbox(delivery_path)
 
     def worker_running(self, name):
         thread = self.threads.get(name)
@@ -73,6 +82,7 @@ class RecordingRuntime:
             return copy.deepcopy({
                 "revision": self.revision,
                 "pending_commands": self.pending_commands,
+                "capacity": self.capacity(),
                 "fn_shortcut": self.fn_shortcut.state,
                 **self.recording,
                 "mode": "hands_free" if self.recording["hands_free"] else
@@ -85,6 +95,27 @@ class RecordingRuntime:
                 "errors": self.errors,
                 **self.readiness(),
             })
+
+    def capacity(self):
+        with self.lock:
+            used = len(self.outstanding_jobs) + int(self.recording_reserved)
+            return {"limit": self.max_transcriptions, "used": used, "available": max(0, self.max_transcriptions - used)}
+
+    def reserve_recording(self):
+        with self.lock:
+            if self.shutting_down or not self.worker_running("transcription"):
+                raise RuntimeUnavailable("Transcription worker is unavailable; restart the backend")
+            if not self.recording_reserved:
+                if self.capacity()["available"] == 0:
+                    raise CapacityUnavailable()
+                self.recording_reserved = True
+                self.state_changed()
+
+    def release_recording(self):
+        with self.lock:
+            if self.recording_reserved:
+                self.recording_reserved = False
+                self.state_changed()
 
     def notify(self, event):
         try:
@@ -111,19 +142,24 @@ class RecordingRuntime:
         }
 
     def publish(self, event):
+        event_type = event["type"]
+        # Disk commits belong to the transcription thread, outside the lock used
+        # by native key callbacks and recording commands.
+        deliver = event_type != "transcription.completed" or self.transcripts.remember(event)
         with self.lock:
-            event_type = event["type"]
-            deliver = event_type != "transcription.completed" or self.transcripts.remember(event)
             if event_type == "recording.command_completed":
                 self.pending_commands = max(0, self.pending_commands - 1)
             elif event_type == "recording.state":
                 self.recording = {key: event.get(key) for key in self.recording}
             elif event_type == "transcription.queued":
+                self.recording_reserved = False
+                self.outstanding_jobs.add(event["recording_id"])
                 self.queued_jobs.append(self.job_metadata(event))
             elif event_type == "transcription.started":
                 self.queued_jobs = [job for job in self.queued_jobs if job["recording_id"] != event["recording_id"]]
                 self.active_job = self.job_metadata(event)
             elif event_type in ("transcription.completed", "transcription.error"):
+                self.outstanding_jobs.discard(event["recording_id"])
                 if self.active_job is not None and self.active_job["recording_id"] == event["recording_id"]:
                     self.active_job = None
                 if event_type == "transcription.error":
@@ -162,6 +198,7 @@ class RecordingRuntime:
                     self.fn_shortcut.disable("Recording workers are unavailable. Restart the backend.")
                     self.stop_recording(session_id)
                 if name == "recording":
+                    self.recording_reserved = False
                     self.recording = {
                         "recording": False, "hands_free": False,
                         "recording_id": None, "conversation_id": None,
@@ -217,6 +254,8 @@ class RecordingRuntime:
             required = ("recording",) if action in ("release", "stop") else tuple(self.workers)
             if self.shutting_down or not all(self.worker_running(name) for name in required):
                 raise RuntimeUnavailable("Required workers are unavailable; restart the backend")
+            if action in ("press", "hands-free") and not self.recording_reserved and self.capacity()["available"] == 0:
+                raise CapacityUnavailable()
             self.pending_commands += 1
             self.events.put({
                 "action": action,
@@ -246,3 +285,4 @@ class RecordingRuntime:
         self.threads["recording"].join()
         self.recordings.put(None)
         self.threads["transcription"].join()
+        self.transcripts.close()

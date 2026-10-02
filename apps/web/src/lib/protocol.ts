@@ -20,6 +20,11 @@ const workerSchema = z.object({
 export const snapshotSchema = z.object({
   revision: z.number(),
   pending_commands: z.number().int().nonnegative(),
+  capacity: z.object({
+    limit: z.number().int().positive(),
+    used: z.number().int().nonnegative(),
+    available: z.number().int().nonnegative(),
+  }),
   fn_shortcut: z.object({
     status: z.enum(['disabled', 'starting', 'enabled', 'failed']),
     error: z.string().nullable(),
@@ -55,7 +60,7 @@ export const eventSchema = z.discriminatedUnion('type', [
     text: z.string(),
   }),
   z.object({
-    type: z.enum(['recording.error', 'transcription.error', 'connection.error']),
+    type: z.enum(['recording.error', 'recording.rejected', 'transcription.error', 'connection.error']),
     message: z.string(),
   }),
 ])

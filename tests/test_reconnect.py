@@ -147,6 +147,7 @@ class ReconnectTests(unittest.TestCase):
                 self.assertNotEqual(event["type"], "connection.error")
                 if event["type"] == "transcription.completed":
                     seen.append(event["recording_id"])
+                    socket.send_json({"type": "transcript.ack", "recording_id": event["recording_id"], "conversation_id": "chat"})
             self.assertEqual(seen, [str(index) for index in range(180)])
             self.assertTrue(self.client.get("/state").json()["ui_connected"])
 
@@ -273,7 +274,7 @@ class ReconnectTests(unittest.TestCase):
             self.assertTrue(capture.closed.wait(3))
             self.assertFalse(capture.on_key(True, time.monotonic()))
             self.assertEqual(self.client.post("/recording/stop", headers=headers).status_code, 403)
-            self.assertGreaterEqual(len(self.runtime.transcripts.replay("chat")), 200)
+            self.assertGreaterEqual(len(list(self.runtime.transcripts.replay("chat"))), 200)
 
     def test_heartbeat_reply_is_not_stuck_behind_a_slow_replay(self):
         for index in range(40):

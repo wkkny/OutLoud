@@ -29,6 +29,8 @@ export function useDictation() {
   const delivered = useRef(new Set<string>())
   const applied = useRef(new Set<string>())
   const pendingAcknowledgements = useRef(new Set<string>())
+  const acknowledgementsInFlight = useRef(new Set<string>())
+  const flushingAcknowledgements = useRef(false)
   const commands = useRef<Promise<unknown>>(Promise.resolve())
   const activeRequest = useRef<AbortController | null>(null)
   const recovering = useRef(false)
@@ -53,17 +55,30 @@ export function useDictation() {
     }
   }, [])
 
+  const flushAcknowledgements = useCallback(() => {
+    if (!session.current || recovering.current || flushingAcknowledgements.current) return
+    flushingAcknowledgements.current = true
+    try {
+      for (const recordingId of pendingAcknowledgements.current) {
+        if (acknowledgementsInFlight.current.size >= 16) break
+        if (acknowledgementsInFlight.current.has(recordingId)) continue
+        // Register before send: test sockets can confirm synchronously.
+        acknowledgementsInFlight.current.add(recordingId)
+        socketRef.current?.send(JSON.stringify({ type: 'transcript.ack', recording_id: recordingId, conversation_id: CONVERSATION_ID }))
+      }
+    } catch {
+      void recover('Transcript acknowledgement failed. Reconnect to retry delivery safely.')
+    } finally {
+      flushingAcknowledgements.current = false
+    }
+  }, [recover])
+
   const acknowledgeTranscript = useCallback((recordingId: string) => {
     if (applied.current.has(recordingId) && !pendingAcknowledgements.current.has(recordingId)) return
     applied.current.add(recordingId)
     pendingAcknowledgements.current.add(recordingId)
-    if (!session.current || recovering.current) return
-    try {
-      socketRef.current?.send(JSON.stringify({ type: 'transcript.ack', recording_id: recordingId, conversation_id: CONVERSATION_ID }))
-    } catch {
-      void recover('Transcript acknowledgement failed. Reconnect to retry delivery safely.')
-    }
-  }, [recover])
+    flushAcknowledgements()
+  }, [flushAcknowledgements])
 
   useEffect(() => {
     let active = true
@@ -106,6 +121,7 @@ export function useDictation() {
           established = true
           clearTimeout(connectionTimer)
           session.current = event.session_id
+          acknowledgementsInFlight.current.clear()
           setConnection('connected')
           setError(null)
           heartbeat = createHeartbeat(
@@ -113,7 +129,7 @@ export function useDictation() {
             () => { void recover('The backend stopped responding. The session was closed to stop recording safely.') },
           )
           heartbeat.ping()
-          for (const id of pendingAcknowledgements.current) acknowledgeTranscript(id)
+          flushAcknowledgements()
           if (!active || recovering.current) return
           const previous: PastError[] = []
           for (const kind of ['recording', 'transcription'] as const) {
@@ -131,7 +147,11 @@ export function useDictation() {
       } else if (event.type === 'session.pong') {
         heartbeat?.pong(event.id)
       } else if (event.type === 'transcript.acknowledged') {
-        if (event.conversation_id === CONVERSATION_ID) pendingAcknowledgements.current.delete(event.recording_id)
+        if (event.conversation_id === CONVERSATION_ID) {
+          pendingAcknowledgements.current.delete(event.recording_id)
+          acknowledgementsInFlight.current.delete(event.recording_id)
+          flushAcknowledgements()
+        }
       } else if (event.type === 'transcription.completed') {
         if (event.conversation_id !== CONVERSATION_ID) return
         if (delivered.current.has(event.recording_id)) {
@@ -186,7 +206,7 @@ export function useDictation() {
       activeRequest.current?.abort()
       socket.close()
     }
-  }, [attempt, recover, acknowledgeTranscript])
+  }, [attempt, recover, acknowledgeTranscript, flushAcknowledgements])
 
   const sendCommand = useCallback((request: BackendCommand) => {
     const action = request.action
@@ -208,6 +228,10 @@ export function useDictation() {
         })
         if (session.current !== token || recovering.current) return false
         if (!response.ok) {
+          if (response.status === 429 && (action === 'press' || action === 'hands-free')) {
+            setError('Transcription capacity is full. Wait for a job to finish before recording again.')
+            return false
+          }
           if (response.status === 403) throw new Error('The recording session has expired.')
           if (response.status === 503) throw new Error('Recording workers are unavailable. Check or restart the backend.')
           throw new Error(`Recording command failed (${response.status}).`)

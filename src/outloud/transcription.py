@@ -80,6 +80,7 @@ def transcription_worker(recordings, on_event=None):
             if on_event is not None:
                 on_event({"type": "transcription.completed", **context, "text": text})
         except Exception as error:
+            metrics["status"] = "failed"
             metrics["error"] = str(error)
             print(
                 f"Transcription failed for {path}: {error}. Audio is still saved.",

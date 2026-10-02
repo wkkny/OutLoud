@@ -2,11 +2,12 @@ import queue
 import time
 
 from .recording import Recorder
+from .capacity import CapacityUnavailable
 from .shortcuts import Controls
 from .transcription import enqueue_recording
 
 
-def recording_worker(events, recordings, on_event=None, recorder=None):
+def recording_worker(events, recordings, on_event=None, recorder=None, *, reserve=lambda: None, release=lambda: None):
     recorder = recorder if recorder is not None else Recorder()
     context = {"conversation_id": None, "session_id": None}
     last_state = None
@@ -24,6 +25,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
 
     def start_recording():
         nonlocal recording_id
+        reserve()
         recorder.start()
         recording_id = recorder.path.parent.name
 
@@ -33,6 +35,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
             save_recording(recorder.stop())
         finally:
             recording_id = None
+            release()
 
     controls = Controls(start_recording, stop_recording)
 
@@ -56,6 +59,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
         except Exception as cleanup_error:
             print(f"Recording cleanup error: {cleanup_error}", flush=True)
         save_recording(getattr(error, "saved_path", None))
+        release()
         message = f"Recording failed: {error}. Check your microphone or permissions and retry."
         print(message, flush=True)
         notify({
@@ -120,6 +124,9 @@ def recording_worker(events, recordings, on_event=None, recorder=None):
                 else:
                     pressed, timestamp = event
                     controls.handle(pressed, timestamp)
+            except CapacityUnavailable as error:
+                pressed_sources.clear()
+                notify({"type": "recording.rejected", "message": str(error), **context})
             except Exception as error:
                 if isinstance(event, dict) and event["action"] in ("release", "stop"):
                     pressed_sources.clear()

@@ -57,6 +57,86 @@ describe('voice-first UI', () => {
     expect(screen.getByRole('button', { name: /Send message/ })).toBeDisabled()
   })
 
+  it('does not lose a held pointer when the pending start reserves the final slot', async () => {
+    render(<App />)
+    connect()
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Hold to record' }), { button: 0, pointerId: 7 })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const reserved = { ...initialState, capacity: { limit: 3, used: 3, available: 0 } }
+    act(() => socket().emit({ type: 'state.updated', state: { ...reserved, revision: 2, pending_commands: 1 } }))
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
+    act(() => socket().emit({ type: 'state.updated', state: { ...reserved, revision: 3, recording: true } }))
+    fireEvent.pointerUp(screen.getByRole('button', { name: 'Release to stop' }), { button: 0, pointerId: 7 })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/recording/release'), expect.anything()))
+  })
+
+  it('bounds unconfirmed acknowledgements and drains them as confirmations arrive', () => {
+    render(<App />)
+    connect()
+    const owner = socket()
+    owner.autoAck = false
+    for (let index = 0; index < 20; index++) {
+      act(() => owner.emit({ type: 'transcription.completed', recording_id: `recording-${index}`, conversation_id: 'local-draft', text: `Line ${index}` }))
+    }
+    const acknowledgements = () => owner.sent.map((value) => JSON.parse(value)).filter((event) => event.type === 'transcript.ack')
+    expect(acknowledgements()).toHaveLength(16)
+    expect(screen.getByDisplayValue(/Line 19/)).toBeInTheDocument()
+    act(() => owner.emit({ type: 'transcript.acknowledged', recording_id: 'recording-0', conversation_id: 'local-draft' }))
+    expect(acknowledgements()).toHaveLength(17)
+    expect(acknowledgements().at(-1).recording_id).toBe('recording-16')
+    expect(owner.closed).toBe(false)
+  })
+
+  it('retries the bounded acknowledgement backlog after reconnect', async () => {
+    render(<App />)
+    connect()
+    socket().autoAck = false
+    for (let index = 0; index < 20; index++) {
+      act(() => socket().emit({ type: 'transcription.completed', recording_id: `retry-${index}`, conversation_id: 'local-draft', text: 'Saved' }))
+    }
+    act(() => socket().close())
+    await screen.findByText('Backend confirmed recording stopped')
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    const replacement = socket()
+    replacement.autoAck = false
+    connect()
+    const acknowledgements = () => replacement.sent.map((value) => JSON.parse(value)).filter((event) => event.type === 'transcript.ack')
+    expect(acknowledgements()).toHaveLength(16)
+    act(() => replacement.emit({ type: 'transcript.acknowledged', recording_id: 'retry-0', conversation_id: 'local-draft' }))
+    expect(acknowledgements()).toHaveLength(17)
+    expect(acknowledgements().at(-1).recording_id).toBe('retry-16')
+    expect(screen.getByDisplayValue(/Saved/)).toBeInTheDocument()
+  })
+
+  it('keeps the owner connected after a capacity rejection and permits retry', async () => {
+    fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Transcription capacity is full.' }, { status: 429 }))
+    render(<App />)
+    connect()
+    const owner = socket()
+    fireEvent.click(screen.getByRole('button', { name: 'Record hands-free' }))
+    await screen.findByText(/Transcription capacity is full/)
+    expect(owner.closed).toBe(false)
+    expect(screen.getByText('Connected · local')).toBeInTheDocument()
+    expect(screen.queryByText('Backend confirmed recording stopped')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Record hands-free' }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows full capacity, blocks new starts, preserves the draft and keeps Stop available', () => {
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this draft' } })
+    const full = { ...initialState, revision: 2, capacity: { limit: 3, used: 3, available: 0 } }
+    act(() => socket().emit({ type: 'state.updated', state: full }))
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Record hands-free' })).toBeDisabled()
+    expect(screen.getByText(/3 of 3 transcription slots used/)).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft')
+    act(() => socket().emit({ type: 'state.updated', state: { ...full, revision: 3, recording: true, hands_free: true } }))
+    expect(screen.getByRole('button', { name: 'Stop recording' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled()
+  })
+
   it('enables retry after connection timeout without losing the draft', async () => {
     vi.useFakeTimers()
     render(<App />)

@@ -79,9 +79,29 @@ capture and queuing a stop even if the browser's WebSocket stays open. The longe
 lease tolerates common background-tab timer throttling; a longer browser/OS
 suspension can still require manual reconnect.
 
-Delivery retention lasts for the running backend process. It is not durable draft
-storage: reloading the page clears the composer, and restarting the backend clears
-the replay/acknowledgement index. Saved audio and transcript files remain on disk.
+Delivery results and acknowledgement markers are stored in
+`recordings/delivery.sqlite3`. Unacknowledged results survive backend restart and
+replay in small batches. This is not durable draft storage: reloading the page
+clears the composer, and already-acknowledged text is not restored.
+
+## Transcription capacity
+
+OutLoud allows **3 outstanding transcriptions** by default, counting the active
+job, queued jobs, and the current recording. A slot is reserved before microphone
+startup. When capacity is full, new recordings are refused without closing the
+owner session; Stop/release and stopping hands-free with Fn still work. The UI
+shows slot usage. Slots reopen after transcription succeeds or fails, or after an
+empty/failed recording releases its reservation.
+
+Configure a positive limit when launching the backend or the combined dev task:
+
+```bash
+OUTLOUD_MAX_TRANSCRIPTIONS=5 bun run dev
+# Or: OUTLOUD_MAX_TRANSCRIPTIONS=5 uv run outloud
+```
+
+Already-accepted commands are rechecked by the recording worker before microphone
+startup; a rapid queued start may report a capacity rejection after HTTP 202.
 
 ## Commands
 
@@ -162,9 +182,12 @@ web output, and Turbo caches are excluded from Git. Whisper's model cache lives
 outside the repository.
 
 Send is disabled until chat is connected. Drafts and transcript deduplication
-are held in page memory. Unacknowledged delivery results are retained in backend
-memory; the transcription queue and delivery backlog are not bounded yet. Backend shutdown drains saved transcription jobs and can wait
-for Whisper; it has no deadline. Do not expose the loopback backend to a network.
+are held in page memory. Transcription capacity is bounded; delivery results and
+acknowledgement markers use disk storage with bounded replay batches, not an
+in-memory backlog. Disk usage is not capped or automatically pruned. Queued audio
+jobs are not automatically resumed after backend restart, although their files
+remain saved. Backend shutdown drains saved transcription jobs and can wait for
+Whisper; it has no deadline. Do not expose the loopback backend to a network.
 
 ## More detail
 

@@ -33,6 +33,8 @@ on the HTTP event loop. Worker events enter that loop through `call_soon_threads
 use the same snapshot shape:
 
 - `revision`: increasing runtime-state revision; clients should ignore older revisions.
+- `capacity`: `limit`, `used`, and `available`; used counts recording reservations,
+  queued jobs, and the active transcription. The default limit is 3.
   Connection ownership (`ui_connected`) is added by the server, not tracked by this revision.
 - `fn_shortcut`: `status` (`disabled`, `starting`, `enabled`, or `failed`) and a safe
   nullable `error`. Optional keyboard capture does not affect worker readiness.
@@ -89,6 +91,7 @@ The first tab receives:
     "recording_id": null,
     "conversation_id": null,
     "transcription": {"status": "idle", "active_job": null, "queued_jobs": []},
+    "capacity": {"limit": 3, "used": 0, "available": 3},
     "errors": {"recording": null, "transcription": null},
     "workers": {
       "recording": {"status": "running", "error": null},
@@ -123,7 +126,15 @@ from old sessions can reach a new owner subscribed to their original conversatio
 Recording routes require the owner token and return **202 Accepted**, not a promise
 that microphone startup succeeded. Observe WebSocket events for the actual result.
 Missing/invalid tokens return 403; invalid request bodies return 422; unavailable
-required workers or shutdown return 503.
+required workers or shutdown return 503. Full transcription capacity returns 429
+for new starts; this is not a lost owner session. The recording worker reserves a
+slot immediately before microphone startup and authoritatively rechecks queued
+starts. A start accepted while earlier commands are pending may later emit
+`recording.rejected` without opening the microphone. Stop/release never need a new
+slot. Fn capacity rejection keeps interception enabled and reports the same event.
+Set `OUTLOUD_MAX_TRANSCRIPTIONS` to a positive integer before startup (default 3).
+Reservations become jobs when audio is queued; completion/failure releases job
+capacity. Empty recordings and failed microphone starts release their reservation.
 
 Press/release gestures use the existing 300 ms double-tap window. Duplicate presses
 are ignored. A double-tap continues one recording; a press during hands-free mode
@@ -175,8 +186,11 @@ a keyboard source. Capture is not automatically retried. See the
 
 ## Transcript delivery and owner liveness
 
-`delivery.py` retains completed results by recording ID before attempting live
-delivery. Results replay after `session.ready`, in completion order, scoped to the
+`delivery.py` commits completed results by recording ID to
+`recordings/delivery.sqlite3` before attempting live delivery. SQLite writes run
+on the transcription thread outside the runtime lock; replay reads and
+acknowledgements run off the HTTP loop. Replay reads batches of at most 16 results
+against a starting high-water mark, so new completions cannot extend it forever. Results replay after `session.ready`, in completion order, scoped to the
 owner's conversation. A completion arriving after reconnect is routed by its
 original conversation, not rejected because its originating session expired.
 Tokens and transcript text are still excluded from metadata snapshots.
@@ -199,8 +213,14 @@ and binary frames revoke ownership and close the socket.
 The frontend acknowledges only after a composer commit. Delivery is at-least-once:
 replay can race live publication or an acknowledgement, so recording-ID deduplication
 is required. Large replay batches stream rather than filling the bounded event
-queue, and heartbeat/ack replies use a separate bounded queue with serialized sends.
-Overflow revokes ownership immediately, even if socket sending is blocked.
+queue. Each owner has a 16-result delivery window: another result is sent only
+when an acknowledgement frees capacity. Clients must acknowledge committed
+results to advance replay. An acknowledgement racing replay/live delivery cannot
+consume a credit permanently; already-acknowledged candidates are skipped.
+Heartbeat/ack replies use a separate bounded queue with serialized sends.
+Acknowledgement writes have their own bounded processing queue (128), so slow
+SQLite writes do not block receipt of pings or disconnects. Queue overflow revokes
+ownership immediately, even if socket sending is blocked.
 
 Only valid application pings renew the 90-second owner lease. Transport-level
 WebSocket pongs and HTTP recording commands do not renew it. A watcher expires idle
@@ -217,17 +237,25 @@ uses existing safe-stop confirmation on failure. The 90-second backend lease all
 for common background timer throttling. Longer suspension requires reconnect.
 Backend-process hangs are not covered by this event-loop watcher.
 
-The inbox and acknowledgement tombstones are in memory for the backend lifetime.
-They are not included in state snapshots, not persisted, and not bounded yet.
-Backend restart clears this index; audio/transcript files remain on disk. Page
-reload clears browser drafts/deduplication; acknowledgement is not durable draft
-storage. Crash/restart recovery and persistent drafts remain separate work.
+The inbox and acknowledgement markers survive backend restart. Acknowledgement
+clears the database's transcript text but retains the recording/conversation
+marker to suppress duplicate completions. Tokens are never stored. Metadata
+snapshots contain neither transcript text nor database paths. The SQLite page
+cache and replay batches are bounded; total disk usage is not capped or pruned.
+Injected/test runtimes without a delivery path use isolated in-memory SQLite.
+Page reload still clears browser drafts/deduplication; acknowledgement is not
+durable draft storage. Audio jobs that had not completed before a crash are not
+automatically resumed; their saved WAV files remain available. A delivery-store
+write failure reports a job error and releases capacity without deleting saved
+audio/transcript files; a result that could not be committed cannot automatically
+replay. Failure metrics reflect this even if Whisper itself completed.
 
 ## WebSocket events
 
 - `state.updated`: full snapshot under `state`.
 - `worker.state`: `worker`, `status`, safe `error` summary.
 - `recording.state`: `recording`, `hands_free`, `recording_id`, `conversation_id`.
+- `recording.rejected`: safe `message` for a queued/native start refused at capacity.
 - `recording.saved`: `recording_id`, `conversation_id`.
 - `recording.error`: `message`, `recording_id`, `conversation_id`.
 - `transcription.queued`: `recording_id`, `conversation_id`.
@@ -260,8 +288,8 @@ programs or users on the same machine. Do not expose the server to a network.
 Not implemented in this step:
 
 - Ollama chat and conversation persistence.
-- Durable delivery-index recovery across backend restart or persistent browser drafts.
-- A bounded transcription queue or chunked long-recording transcription.
+- Persistent browser drafts and automatic recovery of unfinished audio jobs.
+- Disk retention limits or chunked long-recording transcription.
 
 The backend's shutdown drains saved transcription jobs, so exiting can wait for
 Whisper to finish. Run only one backend process; multiple processes would each own
