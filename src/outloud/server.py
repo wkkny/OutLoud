@@ -1,5 +1,7 @@
 import asyncio
 import secrets
+import time
+from typing import Literal
 from contextlib import asynccontextmanager
 
 import anyio
@@ -7,7 +9,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .runtime import RecordingRuntime, RuntimeUnavailable
@@ -28,48 +30,144 @@ class FnRequest(PressRequest):
     enabled: bool = Field(strict=True)
 
 
+class Heartbeat(BaseModel):
+    type: Literal["session.ping"]
+    id: int = Field(strict=True, ge=0, le=9007199254740991)
+
+
+class TranscriptAck(PressRequest):
+    type: Literal["transcript.ack"]
+    recording_id: str = Field(min_length=1, max_length=128)
+
+
+client_message = TypeAdapter(Heartbeat | TranscriptAck)
+
+
 class OwnerConnection:
-    def __init__(self, session_id, websocket):
+    def __init__(self, session_id, websocket, inbox, revoke, *, conversation_id=None, lease_seconds=90, clock=time.monotonic):
         self.session_id = session_id
         self.websocket = websocket
+        self.inbox = inbox
+        self.revoke = revoke
+        self.conversation_id = conversation_id
+        self.lease_seconds = lease_seconds
+        self.clock = clock
+        self.last_heartbeat = clock()
+        self.active = True
         self.events = asyncio.Queue(maxsize=128)
-        self.overflowed = False
+        self.controls = asyncio.Queue(maxsize=128)
+        self.send_lock = asyncio.Lock()
+        self.ready_sent = asyncio.Event()
+
+    def alive(self):
+        return self.active and self.clock() - self.last_heartbeat < self.lease_seconds
 
     def deliver(self, event):
-        if self.overflowed or event.get("session_id") not in (None, self.session_id):
+        if not self.active:
+            return
+        if not self.alive():
+            self.revoke(self)
+            return
+        completed = event["type"] == "transcription.completed"
+        if completed:
+            if self.conversation_id is not None and event["conversation_id"] != self.conversation_id:
+                return
+        elif event.get("session_id") not in (None, self.session_id):
             return
         public_event = {key: value for key, value in event.items() if key != "session_id"}
+        target = self.controls if event["type"] in ("session.pong", "pong", "transcript.acknowledged") else self.events
         try:
-            self.events.put_nowait(public_event)
+            target.put_nowait(public_event)
         except asyncio.QueueFull:
-            self.overflowed = True
-            # A slow client must not block the recording or transcription threads.
-            while not self.events.empty():
-                self.events.get_nowait()
+            # Revoke immediately, not after a potentially blocked socket send.
+            self.revoke(self)
+            for buffer in (self.events, self.controls):
+                while not buffer.empty():
+                    buffer.get_nowait()
             self.events.put_nowait({
                 "type": "connection.error",
                 "message": "Client could not keep up with events; reconnect.",
             })
 
-    async def send_events(self):
+    async def send(self, event):
+        async with self.send_lock:
+            await self.websocket.send_json(event)
+        # Keep receive/lease tasks responsive even if transport sends don't yield.
+        await asyncio.sleep(0)
+
+    async def send_controls(self):
+        await self.ready_sent.wait()
+        while True:
+            await self.send(await self.controls.get())
+
+    async def send_events(self, state_snapshot):
+        await self.send({
+            "type": "session.ready", "session_id": self.session_id,
+            "state": state_snapshot(),
+        })
+        self.ready_sent.set()
+        # Stream replay directly: a backlog larger than the event queue must not
+        # overflow it before the client can acknowledge anything.
+        for event in self.inbox.replay(self.conversation_id):
+            if not self.active:
+                return
+            await self.send(event)
         while True:
             event = await self.events.get()
-            await self.websocket.send_json(event)
+            await self.send(event)
             if event["type"] == "connection.error":
                 await self.websocket.close(code=1013)
                 return
 
+    async def watch_lease(self):
+        while True:
+            remaining = self.lease_seconds - (self.clock() - self.last_heartbeat)
+            if not self.active or remaining <= 0:
+                self.revoke(self)
+                await self.websocket.close(code=1001, reason="Owner heartbeat expired")
+                return
+            await asyncio.sleep(min(remaining, 1))
+
     async def receive_messages(self):
         while True:
-            message = await self.websocket.receive_text()
+            try:
+                message = await self.websocket.receive_text()
+            except KeyError:  # A binary frame is not part of this protocol.
+                self.revoke(self)
+                await self.websocket.close(code=1003, reason="Text messages required")
+                return
+            if not self.alive():
+                self.revoke(self)
+                await self.websocket.close(code=1001, reason="Owner heartbeat expired")
+                return
             if message == "ping":
+                self.last_heartbeat = self.clock()
                 self.deliver({"type": "pong"})
+                continue
+            try:
+                parsed = client_message.validate_json(message)
+            except ValidationError:
+                self.revoke(self)
+                await self.websocket.close(code=1003, reason="Invalid client message")
+                return
+            if isinstance(parsed, Heartbeat):
+                self.last_heartbeat = self.clock()
+                self.deliver({"type": "session.pong", "id": parsed.id})
+            else:
+                if self.conversation_id is not None and parsed.conversation_id != self.conversation_id:
+                    self.revoke(self)
+                    await self.websocket.close(code=1003, reason="Wrong acknowledgement conversation")
+                    return
+                if self.inbox.acknowledge(parsed.recording_id, parsed.conversation_id):
+                    self.deliver({
+                        "type": "transcript.acknowledged", "recording_id": parsed.recording_id,
+                        "conversation_id": parsed.conversation_id,
+                    })
 
 
-def create_app(runtime_factory=RecordingRuntime):
+def create_app(runtime_factory=RecordingRuntime, *, owner_lease_seconds=90, clock=time.monotonic):
     owner = None
     loop = None
-    owner_lock = asyncio.Lock()
 
     def publish(event):
         connection = owner
@@ -114,11 +212,24 @@ def create_app(runtime_factory=RecordingRuntime):
             return JSONResponse({"detail": "Origin is not allowed"}, status_code=403)
         return await call_next(request)
 
+    def revoke(connection):
+        nonlocal owner
+        connection.active = False
+        if owner is connection:
+            app.state.runtime.release_owner(connection.session_id)
+            owner = None
+
+    def live_owner():
+        if owner is not None and not owner.alive():
+            revoke(owner)
+        return owner
+
     async def require_owner(request: Request):
+        connection = live_owner()
         session_id = request.headers.get("x-session-id", "")
-        if owner is None or not secrets.compare_digest(session_id, owner.session_id):
+        if connection is None or not secrets.compare_digest(session_id, connection.session_id):
             raise HTTPException(status_code=403, detail="An active owner session is required")
-        return owner.session_id
+        return connection.session_id
 
     @app.get("/health")
     async def health():
@@ -176,24 +287,34 @@ def create_app(runtime_factory=RecordingRuntime):
         if websocket.headers.get("origin") not in ALLOWED_ORIGINS:
             await websocket.close(code=1008)
             return
-        async with owner_lock:
-            if owner is not None:
-                await websocket.close(code=1008, reason="Another tab owns the recording session")
-                return
-            await websocket.accept()
-            connection = OwnerConnection(secrets.token_urlsafe(32), websocket)
-            owner = connection
-            app.state.runtime.claim_owner(connection.session_id)
+        conversation_id = websocket.query_params.get("conversation_id")
+        if conversation_id is not None and not 1 <= len(conversation_id) <= 128:
+            await websocket.close(code=1003, reason="Invalid conversation ID")
+            return
+        if live_owner() is not None:
+            await websocket.close(code=1008, reason="Another tab owns the recording session")
+            return
+        await websocket.accept()
+        # Accept may yield while another connection claims ownership. Recheck and
+        # claim without an await; never hold a lock across a peer's blocked I/O.
+        if live_owner() is not None:
+            await websocket.close(code=1008, reason="Another tab owns the recording session")
+            return
+        connection = OwnerConnection(
+            secrets.token_urlsafe(32), websocket, app.state.runtime.transcripts, revoke,
+            conversation_id=conversation_id, lease_seconds=owner_lease_seconds, clock=clock,
+        )
+        owner = connection
+        app.state.runtime.claim_owner(connection.session_id)
         tasks = []
         try:
-            await websocket.send_json({
-                "type": "session.ready",
-                "session_id": connection.session_id,
-                "state": state_snapshot(),
-            })
+            # Watch ownership and receive disconnects even if the initial ready
+            # write stalls. The sender keeps ready ahead of all other messages.
             tasks = [
-                asyncio.create_task(connection.send_events()),
+                asyncio.create_task(connection.send_events(state_snapshot)),
+                asyncio.create_task(connection.send_controls()),
                 asyncio.create_task(connection.receive_messages()),
+                asyncio.create_task(connection.watch_lease()),
             ]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -203,14 +324,16 @@ def create_app(runtime_factory=RecordingRuntime):
         finally:
             # Finish releasing ownership even if the ASGI server cancels this task.
             with anyio.CancelScope(shield=True):
+                # Old socket cleanup cannot revoke a replacement owner.
+                revoke(connection)
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-                async with owner_lock:
-                    if owner is connection:
-                        # Enqueued before a new owner can issue commands.
-                        app.state.runtime.release_owner(connection.session_id)
-                        owner = None
+                with anyio.move_on_after(1):
+                    try:
+                        await websocket.close(code=1001)
+                    except (RuntimeError, WebSocketDisconnect):
+                        pass
 
     return app
 

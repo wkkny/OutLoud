@@ -51,13 +51,27 @@ message after the socket opens. On timeout or handshake failure, the socket clos
 and **Reconnect** becomes available. Late events from expired attempts are ignored.
 Retry is manual, and typed text is preserved.
 
+Established sessions send an application heartbeat every 15 seconds. A matching
+reply must arrive within 10 seconds, otherwise the UI closes the owner socket and
+runs the same safe-stop checks as a disconnect. Visibility/page-resume events
+request an immediate probe. The backend's 90-second lease tolerates common
+background timer throttling, but expires a suspended or unresponsive owner and
+releases Fn capture. Fn stays off after reconnect.
+
+The socket subscribes to `local-draft`. Completed transcripts are acknowledged
+only after their text has committed to the composer, including empty results.
+Missed results replay on reconnect; already-applied IDs are acknowledged again
+without re-inserting text. Lost acknowledgement confirmations retry on the next
+connection. Results for other conversations are neither inserted nor acknowledged.
+
 Existing recording/transcription errors from the initial snapshot appear as
 **Previous … error**, with a timestamp and recording ID when available. These are
 historical failures, not a declaration that the backend is currently unavailable.
 Dismissal lasts for this page session, including reconnects. New live errors still
 appear separately, even if an older error was dismissed.
 
-If a command fails or the connected socket disconnects, queued controls are canceled
+If a command fails, the connected socket disconnects, or a fatal `connection.error`
+event arrives, queued controls are canceled
 and the owner session is closed. The backend invalidates its token and queues a stop.
 The UI polls uncached state to confirm the session is gone, recording is idle, and
 all control commands have finished. It does not mistake an idle snapshot during
@@ -65,15 +79,18 @@ microphone startup for a completed stop. Retry is blocked during these checks.
 
 If confirmation fails, the UI says the stop is unconfirmed rather than claiming
 success. Check or restart the backend; **Reconnect** checks safety again before
-opening a new session. Recordings/transcripts are still saved, but transcripts
-completed during this safety disconnect are not replayed into the composer yet.
+opening a new session. Recordings/transcripts are still saved. Results completed
+during this safety disconnect replay after reconnect while the backend remains
+running.
 
 ## Current limits
 
 Send is disabled until Ollama chat is added. Fn capture is off by default and
 resets on disconnect, reload, or backend restart. Drafts are kept only in memory
-and disappear on reload. Manual reconnect does not
-replay transcripts completed while disconnected; saved recordings remain on disk.
+and disappear on reload. The backend's replay and acknowledgement index is also
+in memory and resets on backend restart. Acknowledgement is not durable draft
+persistence; already-acknowledged text is not restored to a reloaded page. Saved
+recordings remain on disk.
 
 Physical double-taps still use the backend's 300 ms window; the dedicated hands-free
 action does not. Pointer capture plus window listeners handle outside releases.

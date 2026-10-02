@@ -12,6 +12,16 @@ class FakeSocket {
   onopen: (() => void) | null = null
 
   closed = false
+  autoPong = true
+  autoAck = true
+  sent: string[] = []
+  send(data: string) {
+    if (this.closed) throw new Error('Socket closed')
+    this.sent.push(data)
+    const message = JSON.parse(data)
+    if (message.type === 'session.ping' && this.autoPong) this.emit({ type: 'session.pong', id: message.id })
+    if (message.type === 'transcript.ack' && this.autoAck) this.emit({ type: 'transcript.acknowledged', recording_id: message.recording_id, conversation_id: message.conversation_id })
+  }
   constructor() { FakeSocket.instances.push(this) }
   close() { this.closed = true; this.onclose?.({ code: 1000 }) }
   emit(event: unknown) { this.onmessage?.({ data: JSON.stringify(event) }) }
@@ -124,6 +134,70 @@ describe('voice-first UI', () => {
     expect(screen.getByRole('textbox')).toHaveValue('Typed draft\nSpoken words.')
   })
 
+  it('acknowledges only after transcripts are committed to the composer, including empty results', async () => {
+    render(<App />)
+    connect()
+    await userEvent.type(screen.getByRole('textbox'), 'Typed')
+    const owner = socket()
+    const send = owner.send.bind(owner)
+    vi.spyOn(owner, 'send').mockImplementation((data) => {
+      const message = JSON.parse(data)
+      if (message.type === 'transcript.ack') expect(screen.getByRole('textbox')).toHaveValue('Typed\nSpoken')
+      send(data)
+    })
+    act(() => {
+      owner.emit({ type: 'transcription.completed', recording_id: 'one', conversation_id: 'local-draft', text: 'Spoken' })
+      owner.emit({ type: 'transcription.completed', recording_id: 'empty', conversation_id: 'local-draft', text: '' })
+    })
+    await waitFor(() => expect(owner.sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack').map((message) => message.recording_id)).toEqual(['one', 'empty']))
+  })
+
+  it('retries a lost acknowledgement after reconnect without restoring text the user edited away', async () => {
+    render(<App />)
+    connect()
+    const owner = socket()
+    owner.autoAck = false
+    const transcript = { type: 'transcription.completed', recording_id: 'one', conversation_id: 'local-draft', text: 'Spoken' }
+    act(() => owner.emit(transcript))
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Spoken'))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Edited instead' } })
+    act(() => owner.close())
+    await screen.findByText('Backend confirmed recording stopped')
+    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    act(() => socket().emit({ type: 'session.ready', session_id: 'replacement', state: initialState }))
+    expect(socket().sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack')).toHaveLength(1)
+    act(() => socket().emit(transcript))
+    expect(screen.getByRole('textbox')).toHaveValue('Edited instead')
+    expect(socket().sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack')).toHaveLength(2)
+  })
+
+  it('appends a missed replay to the preserved draft and ignores other conversations', async () => {
+    render(<App />)
+    connect()
+    await userEvent.type(screen.getByRole('textbox'), 'Preserved')
+    act(() => socket().close())
+    await screen.findByText('Backend confirmed recording stopped')
+    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    connect()
+    act(() => {
+      socket().emit({ type: 'transcription.completed', recording_id: 'missed', conversation_id: 'local-draft', text: 'Offline words' })
+      socket().emit({ type: 'transcription.completed', recording_id: 'other', conversation_id: 'other-chat', text: 'Not here' })
+    })
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Preserved\nOffline words'))
+    expect(socket().sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack').map((message) => message.recording_id)).toEqual(['missed'])
+  })
+
+  it('preserves the appended draft and closes safely when acknowledgement sending fails', async () => {
+    render(<App />)
+    connect()
+    const owner = socket()
+    vi.spyOn(owner, 'send').mockImplementation(() => { throw new Error('socket failed') })
+    act(() => owner.emit({ type: 'transcription.completed', recording_id: 'one', conversation_id: 'local-draft', text: 'Keep these words' }))
+    await screen.findByText('Backend confirmed recording stopped')
+    expect(owner.closed).toBe(true)
+    expect(screen.getByRole('textbox')).toHaveValue('Keep these words')
+  })
+
   it('sends hold/release commands in order with the owner token', async () => {
     render(<App />)
     connect()
@@ -163,6 +237,19 @@ describe('voice-first UI', () => {
     await act(async () => { acceptPress(new Response(null, { status: 202 })) })
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.queryByText('Sending recording controls…')).not.toBeInTheDocument())
+  })
+
+  it('treats a connection.error event as fatal even before the socket closes', async () => {
+    render(<App />)
+    connect()
+    const owner = socket()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my draft' } })
+    act(() => owner.emit({ type: 'connection.error', message: 'Client could not keep up; reconnect.' }))
+    await screen.findByText('Backend confirmed recording stopped')
+    expect(owner.closed).toBe(true)
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my draft')
+    expect(screen.getByText('Client could not keep up; reconnect.')).toBeInTheDocument()
   })
 
   it('closes the session after a failed release and drops queued presses', async () => {

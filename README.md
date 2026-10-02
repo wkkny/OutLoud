@@ -65,6 +65,24 @@ appear next to the toggle; on-screen recording still works without keyboard acce
 If macOS disables the event tap, OutLoud stops recording and asks you to re-enable
 capture rather than silently resuming it.
 
+## Connection recovery
+
+Completed transcripts are retained until the composer acknowledges them. After
+**Reconnect**, missed results replay into their original conversation. Repeated
+results are acknowledged without inserting the text again, even if you edited it.
+Fn remains off after reconnect; enable it again when ready.
+
+The UI sends application heartbeats every 15 seconds and expects a matching reply
+within 10 seconds. A missing reply closes the session and starts safe-stop checks.
+The backend expires ownership after 90 seconds without a heartbeat, releasing Fn
+capture and queuing a stop even if the browser's WebSocket stays open. The longer
+lease tolerates common background-tab timer throttling; a longer browser/OS
+suspension can still require manual reconnect.
+
+Delivery retention lasts for the running backend process. It is not durable draft
+storage: reloading the page clears the composer, and restarting the backend clears
+the replay/acknowledgement index. Saved audio and transcript files remain on disk.
+
 ## Commands
 
 Run these from the repository root:
@@ -144,9 +162,8 @@ web output, and Turbo caches are excluded from Git. Whisper's model cache lives
 outside the repository.
 
 Send is disabled until chat is connected. Drafts and transcript deduplication
-are held in page memory, and transcripts completed
-while disconnected are not replayed after reconnect. The transcription queue is
-not bounded yet. Backend shutdown drains saved transcription jobs and can wait
+are held in page memory. Unacknowledged delivery results are retained in backend
+memory; the transcription queue and delivery backlog are not bounded yet. Backend shutdown drains saved transcription jobs and can wait
 for Whisper; it has no deadline. Do not expose the loopback backend to a network.
 
 ## More detail

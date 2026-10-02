@@ -10,6 +10,14 @@ class FakeSocket {
   onerror: (() => void) | null = null
   onopen: (() => void) | null = null
   closed = false
+  autoPong = true
+  sent: string[] = []
+  send(data: string) {
+    if (this.closed) throw new Error('Socket closed')
+    this.sent.push(data)
+    const message = JSON.parse(data)
+    if (message.type === 'session.ping' && this.autoPong) this.emit({ type: 'session.pong', id: message.id })
+  }
 
   constructor() { FakeSocket.instances.push(this) }
   close() { this.closed = true; this.onclose?.({ code: 1000 }) }
@@ -23,6 +31,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   FakeSocket.instances = []
   vi.stubGlobal('WebSocket', FakeSocket)
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...initialState, ui_connected: false })))
 })
 afterEach(() => vi.useRealTimers())
 
@@ -103,6 +112,28 @@ describe('connection lifecycle', () => {
     await act(async () => { await result.current.reconnect() })
     act(() => socket().ready())
     expect(result.current.connection).toBe('connected')
+  })
+
+  it('closes an established but unresponsive socket and confirms recording stopped', async () => {
+    const { result } = renderHook(useDictation)
+    socket().autoPong = false
+    act(() => socket().ready())
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(socket().closed).toBe(true)
+    expect(result.current.connection).toBe('disconnected')
+    expect(result.current.safety).toBe('stopped')
+    expect(result.current.error).toContain('backend stopped responding')
+    expect(result.current.snapshot).toBeNull()
+  })
+
+  it('probes immediately when the page becomes visible and cleans up established heartbeat timers', () => {
+    const { unmount } = renderHook(useDictation)
+    act(() => socket().ready())
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    expect(socket().sent.map((data) => JSON.parse(data).id)).toEqual([1, 2])
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('clears the connection timer on unmount', () => {

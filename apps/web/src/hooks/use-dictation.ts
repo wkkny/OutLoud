@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { eventSchema } from '@/lib/protocol'
+import { createHeartbeat } from '@/lib/session-heartbeat'
 import { confirmRecordingStopped } from '@/lib/recording-safety'
 import type { PastError, Snapshot, Transcript } from '@/lib/protocol'
 
@@ -26,6 +27,8 @@ export function useDictation() {
   const socketRef = useRef<WebSocket | null>(null)
   const latestRevision = useRef(-1)
   const delivered = useRef(new Set<string>())
+  const applied = useRef(new Set<string>())
+  const pendingAcknowledgements = useRef(new Set<string>())
   const commands = useRef<Promise<unknown>>(Promise.resolve())
   const activeRequest = useRef<AbortController | null>(null)
   const recovering = useRef(false)
@@ -50,14 +53,27 @@ export function useDictation() {
     }
   }, [])
 
+  const acknowledgeTranscript = useCallback((recordingId: string) => {
+    if (applied.current.has(recordingId) && !pendingAcknowledgements.current.has(recordingId)) return
+    applied.current.add(recordingId)
+    pendingAcknowledgements.current.add(recordingId)
+    if (!session.current || recovering.current) return
+    try {
+      socketRef.current?.send(JSON.stringify({ type: 'transcript.ack', recording_id: recordingId, conversation_id: CONVERSATION_ID }))
+    } catch {
+      void recover('Transcript acknowledgement failed. Reconnect to retry delivery safely.')
+    }
+  }, [recover])
+
   useEffect(() => {
     let active = true
     let established = false
+    let heartbeat: ReturnType<typeof createHeartbeat> | null = null
     mounted.current = true
     generation.current += 1
     session.current = null
     latestRevision.current = -1
-    const socket = new WebSocket(WS_URL)
+    const socket = new WebSocket(`${WS_URL}?conversation_id=${encodeURIComponent(CONVERSATION_ID)}`)
     socketRef.current = socket
 
     const connectionTimer = setTimeout(() => {
@@ -92,6 +108,13 @@ export function useDictation() {
           session.current = event.session_id
           setConnection('connected')
           setError(null)
+          heartbeat = createHeartbeat(
+            (id) => socket.send(JSON.stringify({ type: 'session.ping', id })),
+            () => { void recover('The backend stopped responding. The session was closed to stop recording safely.') },
+          )
+          heartbeat.ping()
+          for (const id of pendingAcknowledgements.current) acknowledgeTranscript(id)
+          if (!active || recovering.current) return
           const previous: PastError[] = []
           for (const kind of ['recording', 'transcription'] as const) {
             const failure = event.state.errors[kind]
@@ -105,10 +128,24 @@ export function useDictation() {
           latestRevision.current = event.state.revision
           setSnapshot(event.state)
         }
+      } else if (event.type === 'session.pong') {
+        heartbeat?.pong(event.id)
+      } else if (event.type === 'transcript.acknowledged') {
+        if (event.conversation_id === CONVERSATION_ID) pendingAcknowledgements.current.delete(event.recording_id)
       } else if (event.type === 'transcription.completed') {
-        if (event.conversation_id !== CONVERSATION_ID || delivered.current.has(event.recording_id)) return
+        if (event.conversation_id !== CONVERSATION_ID) return
+        if (delivered.current.has(event.recording_id)) {
+          if (applied.current.has(event.recording_id)) {
+            // Replay may race an earlier acknowledgement. Confirm without appending again.
+            pendingAcknowledgements.current.add(event.recording_id)
+            acknowledgeTranscript(event.recording_id)
+          }
+          return
+        }
         delivered.current.add(event.recording_id)
         setTranscripts((previous) => [...previous, { recordingId: event.recording_id, text: event.text }])
+      } else if (event.type === 'connection.error') {
+        void recover(event.message)
       } else {
         setError(event.message)
       }
@@ -118,6 +155,7 @@ export function useDictation() {
       if (!active) return
       active = false
       clearTimeout(connectionTimer)
+      heartbeat?.stop()
       const hadSession = session.current !== null
       session.current = null
       setSnapshot(null)
@@ -134,15 +172,21 @@ export function useDictation() {
         socket.close()
       }
     }
+    const resume = () => { if (active && established && !document.hidden && !recovering.current) heartbeat?.ping() }
+    document.addEventListener('visibilitychange', resume)
+    window.addEventListener('pageshow', resume)
     return () => {
       active = false
       clearTimeout(connectionTimer)
+      heartbeat?.stop()
+      document.removeEventListener('visibilitychange', resume)
+      window.removeEventListener('pageshow', resume)
       mounted.current = false
       session.current = null
       activeRequest.current?.abort()
       socket.close()
     }
-  }, [attempt, recover])
+  }, [attempt, recover, acknowledgeTranscript])
 
   const sendCommand = useCallback((request: BackendCommand) => {
     const action = request.action
@@ -212,6 +256,7 @@ export function useDictation() {
     connection,
     snapshot,
     transcripts,
+    acknowledgeTranscript,
     error,
     pastErrors,
     dismissPastError: (id: string) => {

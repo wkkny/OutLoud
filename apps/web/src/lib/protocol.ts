@@ -44,6 +44,8 @@ export const snapshotSchema = z.object({
 })
 
 export const eventSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('session.pong'), id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }),
+  z.object({ type: z.literal('transcript.acknowledged'), recording_id: z.string(), conversation_id: z.string() }),
   z.object({ type: z.literal('session.ready'), session_id: z.string(), state: snapshotSchema }),
   z.object({ type: z.literal('state.updated'), state: snapshotSchema }),
   z.object({

@@ -66,7 +66,10 @@ hung inference calls; shutdown still has no deadline.
 
 ## Connect first
 
-Open a WebSocket at `ws://127.0.0.1:8765/events` from the frontend. Allowed origins are
+Open a WebSocket at `ws://127.0.0.1:8765/events?conversation_id=chat-1` from the frontend.
+The optional conversation query scopes transcript replay/live delivery and
+acknowledgements. The browser uses `local-draft`; legacy unscoped clients receive
+results for all conversations. Allowed origins are
 `http://localhost:5173`, `http://127.0.0.1:5173`, and the localhost/127.0.0.1 server
 origins on port 8765. Other origins, including a missing WebSocket Origin, are rejected.
 
@@ -99,9 +102,10 @@ The first tab receives:
 ```
 
 Keep the token in memory. Send it as `X-Session-ID` on recording requests. A second
-tab is rejected while an owner is connected. Disconnecting invalidates the token
-and queues a stop so captured audio is saved and transcribed. A new connection gets
-a new token. Transcripts from the old session are not delivered to the new owner.
+tab is rejected while the owner's lease is active. Disconnecting or lease expiry
+invalidates the token and queues a stop so captured audio is saved and transcribed.
+A new connection gets a new token with Fn disabled. Unacknowledged transcripts
+from old sessions can reach a new owner subscribed to their original conversation.
 
 ## HTTP routes
 
@@ -169,6 +173,56 @@ A finished or stopped native run loop exits capture rather than spinning without
 a keyboard source. Capture is not automatically retried. See the
 [root README](README.md#fnglobe-shortcut) for permissions.
 
+## Transcript delivery and owner liveness
+
+`delivery.py` retains completed results by recording ID before attempting live
+delivery. Results replay after `session.ready`, in completion order, scoped to the
+owner's conversation. A completion arriving after reconnect is routed by its
+original conversation, not rejected because its originating session expired.
+Tokens and transcript text are still excluded from metadata snapshots.
+
+The browser sends these JSON text messages:
+
+```json
+{"type":"session.ping","id":1}
+{"type":"transcript.ack","recording_id":"recording-1","conversation_id":"chat-1"}
+```
+
+Replies are `session.pong` with the same numeric `id`, and
+`transcript.acknowledged` with the recording/conversation IDs. Acknowledgements
+remove retained text only when the conversation matches. They are idempotent;
+duplicate producer completions are suppressed, including after acknowledgement.
+Unknown IDs cannot cancel results that haven't completed yet. A scoped client
+cannot acknowledge another conversation. Invalid JSON, invalid protocol messages,
+and binary frames revoke ownership and close the socket.
+
+The frontend acknowledges only after a composer commit. Delivery is at-least-once:
+replay can race live publication or an acknowledgement, so recording-ID deduplication
+is required. Large replay batches stream rather than filling the bounded event
+queue, and heartbeat/ack replies use a separate bounded queue with serialized sends.
+Overflow revokes ownership immediately, even if socket sending is blocked.
+
+Only valid application pings renew the 90-second owner lease. Transport-level
+WebSocket pongs and HTTP recording commands do not renew it. A watcher expires idle
+owners without requiring an HTTP request. HTTP authorization and new connections
+also reject/revoke an expired owner, and a late ping cannot resurrect it. The lease
+watcher and disconnect receiver start even if the initial `session.ready` write
+stalls. Ownership checks/claims run atomically on the event loop without holding
+locks across socket I/O; a blocked rejected peer cannot delay owner cleanup.
+Concurrent upgrades recheck ownership after accept, so only one wins. Old socket
+cleanup cannot revoke a replacement owner.
+
+The browser probes every 15 seconds, allows 10 seconds for a matching reply, and
+uses existing safe-stop confirmation on failure. The 90-second backend lease allows
+for common background timer throttling. Longer suspension requires reconnect.
+Backend-process hangs are not covered by this event-loop watcher.
+
+The inbox and acknowledgement tombstones are in memory for the backend lifetime.
+They are not included in state snapshots, not persisted, and not bounded yet.
+Backend restart clears this index; audio/transcript files remain on disk. Page
+reload clears browser drafts/deduplication; acknowledgement is not durable draft
+storage. Crash/restart recovery and persistent drafts remain separate work.
+
 ## WebSocket events
 
 - `state.updated`: full snapshot under `state`.
@@ -178,12 +232,16 @@ a keyboard source. Capture is not automatically retried. See the
 - `recording.error`: `message`, `recording_id`, `conversation_id`.
 - `transcription.queued`: `recording_id`, `conversation_id`.
 - `transcription.started`: `recording_id`, `conversation_id`.
-- `transcription.completed`: `recording_id`, `conversation_id`, `text`.
+- `transcription.completed`: `recording_id`, `conversation_id`, `text`; live or replayed.
+- `transcript.acknowledged`: recording/conversation IDs.
+- `session.pong`: numeric heartbeat `id`.
 - `transcription.error`: `recording_id`, `conversation_id`, `message`.
 - `connection.error`: client fell behind; the socket closes with code 1013.
 
-Sending the text `ping` produces `{"type":"pong"}`. The server also uses Uvicorn's
-WebSocket connection handling. Disconnected sessions cannot issue new commands.
+Legacy text `ping` produces `{"type":"pong"}` and renews the application lease.
+The server also uses Uvicorn's transport-level WebSocket connection handling, but
+that alone does not prove the page is responsive. Revoked sessions cannot issue
+new commands or acknowledgements.
 
 Each connection has a bounded event buffer so a slow browser cannot block audio
 workers. Session tokens are excluded from worker events. Snapshot errors use safe
@@ -202,7 +260,7 @@ programs or users on the same machine. Do not expose the server to a network.
 Not implemented in this step:
 
 - Ollama chat and conversation persistence.
-- Transcript replay/deduplication after reconnect. Files remain saved on disk.
+- Durable delivery-index recovery across backend restart or persistent browser drafts.
 - A bounded transcription queue or chunked long-recording transcription.
 
 The backend's shutdown drains saved transcription jobs, so exiting can wait for

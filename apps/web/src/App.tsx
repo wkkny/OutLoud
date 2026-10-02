@@ -9,20 +9,29 @@ import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
 
 export default function App() {
-  const { connection, snapshot, transcripts, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, setFnEnabled, reconnect, dismissError } = useDictation()
-  const [draft, setDraft] = useState('')
+  const { connection, snapshot, transcripts, acknowledgeTranscript, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, setFnEnabled, reconnect, dismissError } = useDictation()
+  const [composer, setComposer] = useState<{ text: string; appliedIds: string[] }>({ text: '', appliedIds: [] })
+  const draft = composer.text
   const consumed = useRef(0)
   const press = useCallback(() => command('press'), [command])
   const release = useCallback(() => command('release'), [command])
   const stop = useCallback(() => command('stop'), [command])
 
   useEffect(() => {
-    const incoming = transcripts.slice(consumed.current).map((item) => item.text.trim()).filter(Boolean)
+    const incoming = transcripts.slice(consumed.current)
     consumed.current = transcripts.length
     if (incoming.length) {
-      setDraft((previous) => [previous, ...incoming].filter(Boolean).join('\n'))
+      setComposer((previous) => ({
+        text: [previous.text, ...incoming.map((item) => item.text.trim())].filter(Boolean).join('\n'),
+        appliedIds: [...previous.appliedIds, ...incoming.map((item) => item.recordingId)],
+      }))
     }
   }, [transcripts])
+
+  // Acknowledge only after the composer containing these results has committed.
+  useEffect(() => {
+    for (const id of composer.appliedIds) acknowledgeTranscript(id)
+  }, [composer.appliedIds, acknowledgeTranscript])
 
   const connected = connection === 'connected'
   const recording = snapshot?.recording ?? false
@@ -141,7 +150,10 @@ export default function App() {
               <Textarea
                 id="composer"
                 value={draft}
-                onChange={(event) => setDraft(event.target.value)}
+                onChange={(event) => {
+                  const text = event.target.value
+                  setComposer((previous) => ({ ...previous, text }))
+                }}
                 placeholder="Your transcript will appear here. You can also type."
                 className="mt-3 min-h-48 resize-y text-base leading-relaxed shadow-none"
               />

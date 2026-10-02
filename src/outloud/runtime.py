@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from .app import recording_worker
+from .delivery import TranscriptInbox
 from .fn_shortcut import FnShortcut
 from .transcription import transcription_worker
 
@@ -46,6 +47,7 @@ class RecordingRuntime:
         self.pending_commands = 0
         self.owner_session_id = None
         self.fn_shortcut = FnShortcut(self, fn_listener_factory)
+        self.transcripts = TranscriptInbox()
 
     def worker_running(self, name):
         thread = self.threads.get(name)
@@ -111,6 +113,7 @@ class RecordingRuntime:
     def publish(self, event):
         with self.lock:
             event_type = event["type"]
+            deliver = event_type != "transcription.completed" or self.transcripts.remember(event)
             if event_type == "recording.command_completed":
                 self.pending_commands = max(0, self.pending_commands - 1)
             elif event_type == "recording.state":
@@ -127,7 +130,7 @@ class RecordingRuntime:
                     self.remember_error("transcription", event)
             elif event_type == "recording.error":
                 self.remember_error("recording", event)
-            if event_type != "recording.command_completed":
+            if event_type != "recording.command_completed" and deliver:
                 self.notify(event)
             self.state_changed()
 
