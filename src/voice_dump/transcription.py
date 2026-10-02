@@ -13,19 +13,37 @@ from .metrics import ResourceSampler, save_metrics
 class TranscriptionJob:
     path: Path
     queued_at: float
+    conversation_id: str | None = None
+    session_id: str | None = None
 
 
-def enqueue_recording(recordings, path):
-    recordings.put(TranscriptionJob(path, time.monotonic()))
+def enqueue_recording(recordings, path, conversation_id=None, session_id=None, on_event=None):
+    job = TranscriptionJob(path, time.monotonic(), conversation_id, session_id)
+    # Publish before enqueueing so a fast worker cannot start ahead of its queued event.
+    if on_event is not None:
+        on_event({
+            "type": "transcription.queued",
+            "recording_id": path.parent.name,
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+        })
+    recordings.put(job)
 
 
-def transcription_worker(recordings):
+def transcription_worker(recordings, on_event=None):
     model = None
     while True:
         job = recordings.get()
         if job is None:
             return
         path = job.path
+        context = {
+            "recording_id": path.parent.name,
+            "conversation_id": job.conversation_id,
+            "session_id": job.session_id,
+        }
+        if on_event is not None:
+            on_event({"type": "transcription.started", **context})
         started = time.monotonic()
         metrics = {
             "recording_id": path.parent.name,
@@ -59,12 +77,16 @@ def transcription_worker(recordings):
             metrics["status"] = "complete"
             print(f"\nTranscript ({path.parent.name}):\n{text}\n", flush=True)
             print(f"Transcript saved: {transcript_path}", flush=True)
+            if on_event is not None:
+                on_event({"type": "transcription.completed", **context, "text": text})
         except Exception as error:
             metrics["error"] = str(error)
             print(
                 f"Transcription failed for {path}: {error}. Audio is still saved.",
                 flush=True,
             )
+            if on_event is not None:
+                on_event({"type": "transcription.error", **context, "message": str(error)})
         finally:
             metrics["save_to_transcript_seconds"] = time.monotonic() - job.queued_at
             audio_seconds = metrics.get("audio_seconds", 0)

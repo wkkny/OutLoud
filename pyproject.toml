@@ -7,9 +7,11 @@ name = "voice-dump"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "anyio>=4.15.1",
     "certifi==2026.7.22",
     "cffi==2.1.1",
     "charset-normalizer==3.5.2",
+    "fastapi>=0.142.2",
     "filelock==4.0.9",
     "fsspec==2026.9.0",
     "idna==3.20",
@@ -36,10 +38,18 @@ dependencies = [
     "tqdm==4.70.1",
     "typing-extensions==4.16.0",
     "urllib3==2.8.0",
+    "uvicorn>=0.54.0",
+    "websockets>=17.1",
 ]
 
 [project.scripts]
 voice-dump = "voice_dump.app:main"
+voice-dump-server = "voice_dump.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_dump"]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+]
