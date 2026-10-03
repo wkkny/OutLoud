@@ -51,8 +51,8 @@ cap of two is a product setting, not a promise of resource headroom. Set
 `OUTLOUD_MAX_CHAT_GENERATIONS=1` if pressure is sustained, and repeat the test on
 the intended machine/workload before increasing the limit.
 
-No physical microphone or Whisper inference ran in this test. Concurrent live
-recording/transcription plus chat still needs a manual hardware check. Deterministic
+No physical microphone or Whisper inference ran in this initial test. The
+follow-up hardware checks below cover live dictation during chat generation. Deterministic
 HTTP/WebSocket and browser tests cover the control and persistence behavior without
 requiring microphone access or model downloads.
 
@@ -80,3 +80,40 @@ Checked with two browser tabs:
 This checks the actual browser/backend wiring. Bounded reconnect exhaustion, CAS
 conflicts, storage failures, partial replies, and cancellation races are covered by
 fixture tests, not a physical network or microphone failure in this browser check.
+
+## Hardware microphone attempt
+
+On 2026-10-03, the MacBook Air input stream opened under the backend launched by the
+dev runner, but the saved WAVs contained only zero-valued PCM. Whisper returned empty
+transcripts or the silence hallucination `you`.
+
+Follow-up on 2026-10-04: launching the backend from cmux, which has macOS microphone
+access enabled, resolved the silent input. A macOS speech sample played through the
+MacBook Air speakers was captured by the built-in microphone (38.36 seconds, peak
+sample 9,325, RMS 965.7); Whisper transcribed the sample into the composer draft.
+The backend returned to idle after stopping capture. This verifies the physical
+input and Whisper path when the backend runs under a mic-authorized launcher.
+
+Final manual hardware check on 2026-10-04: the user confirmed that dictation while
+Gemma was generating worked, and recording and generation could be stopped
+independently. This closes the live microphone/concurrent-generation smoke-test gap.
+
+## Long browser-offline recovery check
+
+On 2026-10-04, a disposable conversation held a saved draft while the browser tab
+was navigated away for about three minutes, longer than the backend's 90-second
+session lease. A physical MacBook Air microphone capture produced a non-silent
+176.3-second WAV. After returning and reconnecting, Whisper's pending transcript
+was appended to the saved draft once and acknowledged by the delivery inbox. The
+saved draft marker also remained intact. This exercises a long browser-away and
+WebSocket reconnect; macOS itself was not put to sleep and Wi-Fi was not disabled.
+
+## GitHub CI merge-gate check
+
+On 2026-10-04, GitHub's active `Protect main` ruleset was checked and requires the
+aggregate `CI` status. At the time, PR #7's [CI run 37145566684](https://github.com/wkkny/OutLoud/actions/runs/37145566684)
+failed: Web and the Ubuntu and Windows backend jobs passed, while the
+macOS backend job failed in `test_replay_recovery_notifies_an_already_connected_tab`
+with `WebSocketDisconnect`; aggregate `CI` therefore failed. PR #7 was closed and
+unmerged. This records that historical failure; it does not establish that the
+WebSocket recovery issue has been fixed.
