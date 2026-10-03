@@ -1,18 +1,39 @@
+import sys
 import threading
 import time
 
-import Quartz
-from CoreFoundation import (
-    CFRunLoopAddSource,
-    CFRunLoopGetCurrent,
-    CFRunLoopRemoveSource,
-    CFRunLoopRunInMode,
-    CFMachPortCreateRunLoopSource,
-    kCFRunLoopCommonModes,
-    kCFRunLoopDefaultMode,
-    kCFRunLoopRunFinished,
-    kCFRunLoopRunStopped,
+Quartz = None
+if sys.platform == "darwin":
+    try:
+        import Quartz
+        from CoreFoundation import (
+            CFRunLoopAddSource,
+            CFRunLoopGetCurrent,
+            CFRunLoopRemoveSource,
+            CFRunLoopRunInMode,
+            CFMachPortCreateRunLoopSource,
+            kCFRunLoopCommonModes,
+            kCFRunLoopDefaultMode,
+            kCFRunLoopRunFinished,
+            kCFRunLoopRunStopped,
+        )
+    except ImportError:
+        Quartz = None
+
+FN_UNSUPPORTED_PLATFORM = "Fn/Globe capture is only available on macOS."
+FN_FRAMEWORKS_UNAVAILABLE = (
+    "Could not load Quartz/CoreFoundation for Fn/Globe capture. "
+    "Reinstall the backend dependencies and restart the app."
 )
+
+
+def fn_availability_error():
+    if sys.platform != "darwin":
+        return FN_UNSUPPORTED_PLATFORM
+    if Quartz is None:
+        return FN_FRAMEWORKS_UNAVAILABLE
+    return None
+
 
 DOUBLE_TAP_SECONDS = 0.3
 
@@ -70,6 +91,14 @@ class Controls:
 class FnListener:
     """Native event tap. Construct/start/run/close on one thread; stop only signals it."""
 
+    @staticmethod
+    def availability_error():
+        return fn_availability_error()
+
+    @staticmethod
+    def is_supported():
+        return fn_availability_error() is None
+
     def __init__(self, on_key, on_failure):
         self.on_key = on_key
         self.on_failure = on_failure
@@ -107,6 +136,9 @@ class FnListener:
         return event
 
     def start(self):
+        availability_error = self.availability_error()
+        if availability_error is not None:
+            raise RuntimeError(availability_error)
         if self.stopped.is_set():
             return
         # Enabling while Fn is already held must require a fresh press.

@@ -1,4 +1,5 @@
 import json
+import sys
 import threading
 import time
 import unittest
@@ -6,8 +7,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
-import Quartz
-from CoreFoundation import kCFRunLoopRunFinished, kCFRunLoopRunStopped
+if sys.platform == "darwin":
+    import Quartz
+    from CoreFoundation import kCFRunLoopRunFinished, kCFRunLoopRunStopped
+else:
+    Quartz = None
 
 from outloud.runtime import RecordingRuntime
 from outloud.server import create_app
@@ -97,6 +101,23 @@ class FnShortcutTests(unittest.TestCase):
         self.assertEqual(self.configure(headers).status_code, 202)
         self.wait_state(lambda state: state["fn_shortcut"]["status"] == "enabled")
         return self.factory.instances[-1]
+
+    def test_unsupported_fn_shortcut_does_not_block_backend(self):
+        class UnsupportedFactory(FakeFnFactory):
+            @staticmethod
+            def availability_error():
+                return "Fn/Globe capture is unavailable in this test."
+
+        self.runtime.fn_shortcut.listener_factory = UnsupportedFactory()
+        with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
+            headers = self.headers(websocket)
+            self.assertEqual(self.configure(headers).status_code, 202)
+            state = self.client.get("/state").json()
+            self.assertEqual(state["fn_shortcut"], {
+                "status": "failed",
+                "error": "Fn/Globe capture is unavailable in this test.",
+            })
+            self.assertEqual(self.client.get("/ready").status_code, 200)
 
     def drain(self, recording):
         return self.wait_state(lambda state: state["pending_commands"] == 0 and state["recording"] == recording)
@@ -392,6 +413,7 @@ class FnShortcutTests(unittest.TestCase):
             self.assertEqual(self.client.get("/state").json()["fn_shortcut"]["status"], "disabled")
 
 
+@unittest.skipUnless(sys.platform == "darwin", "Fn event tap is macOS-only")
 class FnListenerTests(unittest.TestCase):
     def setUp(self):
         self.key = Mock(return_value=True)

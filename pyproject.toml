@@ -27,7 +27,7 @@ dependencies = [
     "openai-whisper==20250625",
     "psutil>=7.2.2",
     "pycparser==3.0",
-    "pyobjc-framework-quartz>=12.2.2",
+    "pyobjc-framework-quartz>=12.2.2; sys_platform == 'darwin'",
     "regex==2026.9.29",
     "requests==2.34.2",
     "scipy==1.17.1",
