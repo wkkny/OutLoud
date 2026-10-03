@@ -80,3 +80,20 @@ Checked with two browser tabs:
 This checks the actual browser/backend wiring. Bounded reconnect exhaustion, CAS
 conflicts, storage failures, partial replies, and cancellation races are covered by
 fixture tests, not a physical network or microphone failure in this browser check.
+
+## Hardware microphone attempt
+
+On 2026-10-03, the MacBook Air input stream opened under the backend launched by the
+dev runner, but the saved WAVs contained only zero-valued PCM. Whisper returned empty
+transcripts or the silence hallucination `you`.
+
+Follow-up on 2026-10-04: launching the backend from cmux, which has macOS microphone
+access enabled, resolved the silent input. A macOS speech sample played through the
+MacBook Air speakers was captured by the built-in microphone (38.36 seconds, peak
+sample 9,325, RMS 965.7); Whisper transcribed the sample into the composer draft.
+The backend returned to idle after stopping capture. This verifies the physical
+input and Whisper path when the backend runs under a mic-authorized launcher.
+
+A final manual check with a person speaking while Gemma is generating, then stopping
+recording and generation independently, remains to be done. Keep the backend running
+from a launcher with microphone permission, such as cmux, for that check.
