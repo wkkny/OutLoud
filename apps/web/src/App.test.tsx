@@ -1,686 +1,526 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { toast } from 'sonner'
+import { beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
-import { initialState } from '@/test/backend-fixture'
+import { backendFixture, FakeSocket, initialState } from '@/test/backend-fixture'
 
-class FakeSocket {
-  static instances: FakeSocket[] = []
-  onmessage: ((event: { data: string }) => void) | null = null
-  onclose: ((event: { code: number }) => void) | null = null
-  onerror: (() => void) | null = null
-  onopen: (() => void) | null = null
+let backend: ReturnType<typeof backendFixture>
+beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); backend = backendFixture() })
+async function open() {
+  const view = render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByRole('button', { name: 'Select First chat' })
+  return view
+}
 
-  closed = false
-  autoPong = true
-  autoAck = true
-  sent: string[] = []
-  send(data: string) {
-    if (this.closed) throw new Error('Socket closed')
-    this.sent.push(data)
-    const message = JSON.parse(data)
-    if (message.type === 'session.ping' && this.autoPong) this.emit({ type: 'session.pong', id: message.id })
-    if (message.type === 'transcript.ack' && this.autoAck) this.emit({ type: 'transcript.acknowledged', recording_id: message.recording_id, conversation_id: message.conversation_id })
+it('creates, selects, renames, deletes and restores durable conversations independently of the socket', async () => {
+  const view = await open()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Ideas' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  await screen.findByRole('button', { name: 'Select Ideas' })
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words'))
+  expect(backend.socket().closed).toBe(false)
+  expect(backend.socket().url).toBe('ws://127.0.0.1:8765/events')
+  view.unmount()
+  await open()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  fireEvent.click(screen.getByRole('button', { name: 'Select Ideas' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Select Ideas' })).not.toBeInTheDocument())
+})
+
+it('rebases unsaved edits on atomic remote dictation without appending the transcript twice', async () => {
+  await open()
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Edited words' } })
+  const saved = backend.conversations.get('chat-1')!
+  saved.draft = 'Saved words\nDictated words'; saved.draft_version++
+  act(() => {
+    backend.socket().emit({ type: 'transcription.completed', recording_id: 'r1', conversation_id: 'chat-1', text: 'Dictated words' })
+    backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' })
+  })
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Edited words\nDictated words'))
+  await waitFor(() => expect(backend.socket().sent).toContainEqual({ type: 'transcript.ack', recording_id: 'r1', conversation_id: 'chat-1' }))
+  await waitFor(() => expect(saved.draft).toBe('Edited words\nDictated words'))
+  act(() => backend.socket().emit({ type: 'transcription.completed', recording_id: 'r1', conversation_id: 'chat-1', text: 'Dictated words' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Edited words\nDictated words')
+})
+
+it('preserves both drafts when a version conflict cannot merge, and allows deliberate resolution', async () => {
+  await open()
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'My local edit' } })
+  const saved = backend.conversations.get('chat-1')!
+  saved.draft = 'Other tab replacement'; saved.draft_version++
+  await screen.findByText('Draft conflict')
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('My local edit')
+  expect(screen.getByText('Other tab replacement')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Keep both drafts' }))
+  await waitFor(() => expect(saved.draft).toBe('My local edit\nOther tab replacement'))
+})
+
+it('toggles capture on clicks only, keeps the recording owner connected while switching, and routes dictation to its origin', async () => {
+  await open()
+  const mic = screen.getByRole('button', { name: 'Start recording' })
+  fireEvent.pointerDown(mic); fireEvent.pointerUp(mic)
+  expect(backend.requests.filter((request) => request.path.startsWith('/recording/'))).toHaveLength(0)
+  fireEvent.click(mic)
+  await waitFor(() => expect(backend.requests).toContainEqual({ path: '/recording/start', method: 'POST', body: { conversation_id: 'chat-1' } }))
+  const owner = backend.socket()
+  act(() => owner.emit({ type: 'state.updated', state: { ...initialState, revision: 2, capture_owned: true, client_connected: true, recording: true, conversation_id: 'chat-1' } }))
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  expect(owner.closed).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Stop recording' }))
+  await waitFor(() => expect(backend.requests).toContainEqual({ path: '/recording/stop', method: 'POST', body: {} }))
+  const origin = backend.conversations.get('chat-1')!
+  origin.draft = 'Saved words\nOld capture'; origin.draft_version++
+  act(() => owner.emit({ type: 'transcription.completed', recording_id: 'old', conversation_id: 'chat-1', text: 'Old capture' }))
+  await waitFor(() => expect(owner.sent).toContainEqual({ type: 'transcript.ack', recording_id: 'old', conversation_id: 'chat-1' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('')
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words\nOld capture'))
+  expect(screen.queryByText(/Fn|Hold to|hands-free/)).not.toBeInTheDocument()
+})
+
+it('shows app-wide microphone occupancy without rejecting the tab connection', async () => {
+  await open()
+  act(() => backend.socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, capture_owned: false, client_connected: true, recording: true, conversation_id: 'elsewhere' } }))
+  expect(screen.getByText('Microphone occupied in another tab')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
+  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+})
+
+it('sends only the latest user message with backend identity, displays the reply and clears the accepted draft', async () => {
+  await open()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Local reply')
+  expect(backend.requests.find((request) => request.path === '/chat')?.body).toMatchObject({ conversation_id: 'chat-1', messages: [{ role: 'user', content: 'Saved words' }] })
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  expect(backend.conversations.get('chat-1')?.draft).toBe('')
+})
+
+it.each([[429, 'Generation capacity is busy'], [409, 'This conversation is already generating'], [503, 'Conversation storage is busy'], [403, 'The chat session expired'], [404, 'This conversation was deleted']])('keeps the draft and reports a %s refusal without retrying the model', async (status, message) => {
+  await open()
+  backend.setChatStatus(Number(status))
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText(String(message), { exact: false })
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(1)
+  expect(screen.queryByText('Local reply')).not.toBeInTheDocument()
+})
+
+it('backs off failed initial connections, exhausts a bounded retry budget and retains tab selection and unsaved text across reload', async () => {
+  vi.useFakeTimers()
+  const view = render(<App />)
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Offline edits' } })
+  for (const delay of [500, 1000, 2000, 4000]) {
+    act(() => backend.socket().onerror?.())
+    const count = FakeSocket.instances.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1) })
+    expect(FakeSocket.instances).toHaveLength(count)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(FakeSocket.instances).toHaveLength(count + 1)
   }
-  constructor() { FakeSocket.instances.push(this) }
-  close() { this.closed = true; this.onclose?.({ code: 1000 }) }
-  emit(event: unknown) { this.onmessage?.({ data: JSON.stringify(event) }) }
-}
-
-function socket() { return FakeSocket.instances[FakeSocket.instances.length - 1] }
-function connect() {
-  act(() => socket().emit({ type: 'session.ready', session_id: 'test-session', state: initialState }))
-}
-
-const defaultFetch: typeof fetch = async (_url, init) => init?.method === 'POST'
-  ? new Response(null, { status: 202 })
-  : Response.json({ ...initialState, ui_connected: false })
-const fetchMock = vi.fn<typeof fetch>(defaultFetch)
-
-beforeEach(async () => {
-  toast.dismiss()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  FakeSocket.instances = []
-  fetchMock.mockReset().mockImplementation(defaultFetch)
-  vi.stubGlobal('WebSocket', FakeSocket)
-  vi.stubGlobal('fetch', fetchMock)
-})
-
-afterEach(async () => {
+  act(() => backend.socket().onerror?.())
+  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
+  expect(FakeSocket.instances).toHaveLength(5)
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Offline edits')
+  view.unmount()
   vi.useRealTimers()
-  act(() => toast.dismiss())
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await open()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Offline edits')
 })
 
-describe('voice-first UI', () => {
-  it('sends reviewed text to Gemma, renders the reply and clears only the sent draft', async () => {
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/chat')) {
-        const body = JSON.parse(String(init?.body))
-        return new Response([
-          { type: 'chat.started', request_id: body.request_id, model: 'gemma3:4b', context_tokens: 4096 },
-          { type: 'chat.delta', request_id: body.request_id, text: 'Hello from Gemma.' },
-          { type: 'chat.done', request_id: body.request_id, metrics: { output_tokens: 5, elapsed_seconds: 1 } },
-        ].map((event) => JSON.stringify(event)).join('\n') + '\n')
-      }
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Hello Gemma' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText('Hello from Gemma.')
-    expect(screen.getByText('Hello Gemma')).toBeInTheDocument()
-    expect(screen.getByRole('textbox')).toHaveValue('')
-    const request = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/chat'))
-    expect(JSON.parse(String(request?.[1]?.body)).messages).toEqual([{ role: 'user', content: 'Hello Gemma' }])
-  })
+it('reconnects after loss using the old client safety check even if another tab is connected and recording', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  backend.fetchMock.mockImplementation(async (url, init) => String(url).endsWith('/state')
+    ? Response.json({ ...initialState, client_connected: false, capture_owned: false, ui_connected: true, recording: true })
+    : baseFetch(url, init))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Retain this' } })
+  vi.useFakeTimers()
+  act(() => backend.socket().close())
+  await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+  expect(FakeSocket.instances).toHaveLength(2)
+  const stateCall = backend.fetchMock.mock.calls.find(([url]) => String(url).endsWith('/state'))!
+  expect(stateCall[1]?.headers).toEqual({ 'X-Session-ID': 'test-session' })
+  act(() => backend.socket().ready())
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Retain this')
+  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+  vi.useRealTimers()
+})
 
-  it('keeps the draft and recording connection when Ollama cannot start', async () => {
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/chat')) {
-        const { request_id } = JSON.parse(String(init?.body))
-        return new Response(JSON.stringify({ type: 'chat.error', request_id, message: 'Cannot reach Ollama. Start it with: ollama serve' }) + '\n')
-      }
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    const owner = socket()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my question' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText(/Cannot reach Ollama/)
-    expect(screen.getByRole('textbox')).toHaveValue('Keep my question')
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
-    expect(owner.closed).toBe(false)
-  })
+it('keeps independent streams scoped while switching and ignores history reloads until a run finishes', async () => {
+  await open()
+  backend.holdChats()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  act(() => backend.delta('chat-1', 'First answer'))
+  await screen.findByText('First answer')
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Second question' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  act(() => backend.delta('chat-2', 'Second answer'))
+  await screen.findByText('Second answer')
+  expect(screen.queryByText('First answer')).not.toBeInTheDocument()
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  await screen.findByText('First answer')
+  expect(screen.queryByText('Second answer')).not.toBeInTheDocument()
+  act(() => { backend.done('chat-1'); backend.done('chat-2') })
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop generation' })).not.toBeInTheDocument())
+  expect(screen.getAllByText('First answer')).toHaveLength(1)
+})
 
-  it('stops generation, keeps partial text and sends only completed turns next time', async () => {
-    let requests = 0
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/chat')) {
-        const { request_id } = JSON.parse(String(init?.body))
-        requests++
-        if (requests === 1) {
-          return new Response(new ReadableStream({ start(controller) {
-            controller.enqueue(new TextEncoder().encode([
-              { type: 'chat.started', request_id }, { type: 'chat.delta', request_id, text: 'Partial reply' },
-            ].map((event) => JSON.stringify(event)).join('\n') + '\n'))
-          } }))
-        }
-        return new Response([
-          { type: 'chat.started', request_id }, { type: 'chat.delta', request_id, text: 'Finished reply' },
-          { type: 'chat.done', request_id, metrics: { elapsed_seconds: 1 } },
-        ].map((event) => JSON.stringify(event)).join('\n') + '\n')
-      }
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First question' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText('Partial reply')
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Next question' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Stop generation' }))
-    await screen.findByText('Stopped · partial reply')
-    expect(screen.getByRole('textbox')).toHaveValue('Next question')
-    expect(screen.getByText('Partial reply')).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText('Finished reply')
-    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/chat'))
-    expect(JSON.parse(String(calls[1][1]?.body)).messages).toEqual([{ role: 'user', content: 'Next question' }])
-  })
-
-  it('preserves edits made while Ollama is starting', async () => {
-    let accept: (() => void) | undefined
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/chat')) {
-        const { request_id } = JSON.parse(String(init?.body))
-        return new Response(new ReadableStream({ start(controller) {
-          accept = () => {
-            controller.enqueue(new TextEncoder().encode([
-              { type: 'chat.started', request_id }, { type: 'chat.delta', request_id, text: 'Reply after loading' },
-              { type: 'chat.done', request_id, metrics: { elapsed_seconds: 1 } },
-            ].map((event) => JSON.stringify(event)).join('\n') + '\n'))
-            controller.close()
-          }
-        } }))
-      }
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Sent text' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New edits while loading' } })
-    act(() => accept?.())
-    await screen.findByText('Reply after loading')
-    expect(screen.getByRole('textbox')).toHaveValue('New edits while loading')
-  })
-
-  it('decodes Unicode replies split across individual bytes and accepts a final line without newline', async () => {
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/chat')) {
-        const { request_id } = JSON.parse(String(init?.body))
-        const bytes = new TextEncoder().encode([
-          { type: 'chat.started', request_id },
-          { type: 'chat.delta', request_id, text: 'Hello 👋 — こんにちは' },
-          { type: 'chat.done', request_id, metrics: { elapsed_seconds: 0.1 } },
-        ].map((event) => JSON.stringify(event)).join('\n'))
-        return new Response(new ReadableStream({ start(controller) {
-          for (const byte of bytes) controller.enqueue(Uint8Array.of(byte))
-          controller.close()
-        } }))
-      }
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Unicode question' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText('Hello 👋 — こんにちは')
-    await screen.findByText('0.1s')
-    expect(screen.queryByText('Chat could not finish')).not.toBeInTheDocument()
-  })
-
-  it('keeps interrupted replies visible but excludes them from the next request', async () => {
-    let calls = 0
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/chat')) {
-        const { request_id } = JSON.parse(String(init?.body))
-        calls++
-        const events = [
-          { type: 'chat.started', request_id },
-          { type: 'chat.delta', request_id, text: calls === 1 ? 'Interrupted text' : 'Complete text' },
-        ]
-        const encoded = events.map((event) => JSON.stringify(event))
-        if (calls > 1) encoded.push(JSON.stringify({ type: 'chat.done', request_id, metrics: { elapsed_seconds: 1 } }))
-        return new Response(encoded.join('\n') + '\n')
-      }
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First message' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText('Failed · partial reply')
-    expect(screen.getByText('Interrupted text')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Use this text again' })).toBeInTheDocument()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Retry question' } })
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByText('Complete text')
-    const requests = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/chat'))
-    expect(JSON.parse(String(requests[1][1]?.body)).messages).toEqual([{ role: 'user', content: 'Retry question' }])
-  })
-
-  it('keeps the composer usable while disconnected and disables recording', async () => {
-    render(<App />)
-    act(() => socket().close())
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    expect(screen.getByText('uv run outloud')).toBeInTheDocument()
-    await userEvent.type(screen.getByRole('textbox', { name: 'Your text' }), 'Draft without a backend')
-    expect(screen.getByRole('textbox')).toHaveValue('Draft without a backend')
-    expect(screen.getByRole('button', { name: /Send message/ })).toBeDisabled()
-  })
-
-  it('does not lose a held pointer when the pending start reserves the final slot', async () => {
-    render(<App />)
-    connect()
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Hold to record' }), { button: 0, pointerId: 7 })
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    const reserved = { ...initialState, capacity: { limit: 3, used: 3, available: 0 } }
-    act(() => socket().emit({ type: 'state.updated', state: { ...reserved, revision: 2, pending_commands: 1 } }))
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
-    act(() => socket().emit({ type: 'state.updated', state: { ...reserved, revision: 3, recording: true } }))
-    fireEvent.pointerUp(screen.getByRole('button', { name: 'Release to stop' }), { button: 0, pointerId: 7 })
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/recording/release'), expect.anything()))
-  })
-
-  it('bounds unconfirmed acknowledgements and drains them as confirmations arrive', () => {
-    render(<App />)
-    connect()
-    const owner = socket()
-    owner.autoAck = false
-    for (let index = 0; index < 20; index++) {
-      act(() => owner.emit({ type: 'transcription.completed', recording_id: `recording-${index}`, conversation_id: 'local-draft', text: `Line ${index}` }))
+it('clears the accepted draft by CAS without erasing dictation committed during the clear', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let appended = false
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if (!appended && init?.method === 'PATCH' && JSON.parse(String(init.body)).draft === '') {
+      appended = true
+      const saved = backend.conversations.get('chat-1')!
+      saved.draft = 'Saved words\nArrived while sending'; saved.draft_version++
     }
-    const acknowledgements = () => owner.sent.map((value) => JSON.parse(value)).filter((event) => event.type === 'transcript.ack')
-    expect(acknowledgements()).toHaveLength(16)
-    expect(screen.getByDisplayValue(/Line 19/)).toBeInTheDocument()
-    act(() => owner.emit({ type: 'transcript.acknowledged', recording_id: 'recording-0', conversation_id: 'local-draft' }))
-    expect(acknowledgements()).toHaveLength(17)
-    expect(acknowledgements().at(-1).recording_id).toBe('recording-16')
-    expect(owner.closed).toBe(false)
+    return baseFetch(url, init)
   })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Local reply')
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Arrived while sending'))
+  expect(backend.conversations.get('chat-1')?.draft).toBe('Arrived while sending')
+})
 
-  it('retries the bounded acknowledgement backlog after reconnect', async () => {
-    render(<App />)
-    connect()
-    socket().autoAck = false
-    for (let index = 0; index < 20; index++) {
-      act(() => socket().emit({ type: 'transcription.completed', recording_id: `retry-${index}`, conversation_id: 'local-draft', text: 'Saved' }))
+it('retains edits typed while chat acceptance is pending', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let accept: (response: Response) => void = () => {}
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/chat')) return new Promise((resolve) => { accept = resolve.bind(null, response) })
+    return response
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'New edits during loading' } })
+  await act(async () => accept(new Response()))
+  await screen.findByText('Local reply')
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('New edits during loading')
+})
+
+it('refreshes the shared library on remote create/rename/delete without changing this tab’s selection', async () => {
+  await open()
+  backend.conversations.set('remote', { ...backend.conversations.get('chat-1')!, id: 'remote', title: 'Another tab', draft: 'Remote draft', messages: [] })
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'remote' }))
+  await screen.findByRole('button', { name: 'Select Another tab' })
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  backend.conversations.get('remote')!.title = 'Renamed remotely'
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'remote' }))
+  await screen.findByRole('button', { name: 'Select Renamed remotely' })
+  backend.conversations.delete('remote')
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'remote' }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Select Renamed remotely' })).not.toBeInTheDocument())
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+})
+
+it('retains unsaved draft recovery through reload after a storage failure and retries saving explicitly', async () => {
+  const view = await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let storeBusy = true
+  backend.fetchMock.mockImplementation(async (url, init) => init?.method === 'PATCH' && storeBusy
+    ? Response.json({ detail: 'Store busy' }, { status: 503 }) : baseFetch(url, init))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Unsaved offline recovery' } })
+  await screen.findByRole('button', { name: 'Retry saving draft' })
+  view.unmount()
+  await open()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Unsaved offline recovery')
+  await screen.findByRole('button', { name: 'Retry saving draft' })
+  storeBusy = false
+  fireEvent.click(screen.getByRole('button', { name: 'Retry saving draft' }))
+  await waitFor(() => expect(backend.conversations.get('chat-1')?.draft).toBe('Unsaved offline recovery'))
+})
+
+it('keeps the last local edit when typing races an in-flight save and its WS echo', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: () => void = () => {}
+  let held = false
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (init?.method === 'PATCH' && !held) {
+      held = true
+      return new Promise((resolve) => { release = () => resolve(response) })
     }
-    act(() => socket().close())
-    await screen.findByText('Backend confirmed recording stopped')
-    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    const replacement = socket()
-    replacement.autoAck = false
-    connect()
-    const acknowledgements = () => replacement.sent.map((value) => JSON.parse(value)).filter((event) => event.type === 'transcript.ack')
-    expect(acknowledgements()).toHaveLength(16)
-    act(() => replacement.emit({ type: 'transcript.acknowledged', recording_id: 'retry-0', conversation_id: 'local-draft' }))
-    expect(acknowledgements()).toHaveLength(17)
-    expect(acknowledgements().at(-1).recording_id).toBe('retry-16')
-    expect(screen.getByDisplayValue(/Saved/)).toBeInTheDocument()
+    return response
   })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'First edit' } })
+  await waitFor(() => expect(held).toBe(true))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Latest edit' } })
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await act(async () => { await Promise.resolve(); await Promise.resolve() })
+  act(() => release())
+  await waitFor(() => expect(backend.conversations.get('chat-1')?.draft).toBe('Latest edit'))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Latest edit')
+  expect(screen.queryByText('Draft conflict')).not.toBeInTheDocument()
+})
 
-  it('keeps the owner connected after a capacity rejection and permits retry', async () => {
-    fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Transcription capacity is full.' }, { status: 429 }))
-    render(<App />)
-    connect()
-    const owner = socket()
-    fireEvent.click(screen.getByRole('button', { name: 'Record hands-free' }))
-    await screen.findByText(/Transcription capacity is full/)
-    expect(owner.closed).toBe(false)
-    expect(screen.getByText('Connected · local')).toBeInTheDocument()
-    expect(screen.queryByText('Backend confirmed recording stopped')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Record hands-free' }))
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-  })
+it('allows deliberate cancellation of the displayed conversation only', async () => {
+  await open()
+  backend.holdChats()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  act(() => backend.delta('chat-1', 'Partial answer'))
+  await screen.findByText('Partial answer')
+  fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }))
+  await screen.findByText('cancelled · partial reply')
+  expect(screen.getByText('Partial answer')).toBeInTheDocument()
+  expect(backend.requests.filter((request) => request.path === '/chat/cancel')).toHaveLength(1)
+})
 
-  it('shows full capacity, blocks new starts, preserves the draft and keeps Stop available', () => {
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this draft' } })
-    const full = { ...initialState, revision: 2, capacity: { limit: 3, used: 3, available: 0 } }
-    act(() => socket().emit({ type: 'state.updated', state: full }))
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Record hands-free' })).toBeDisabled()
-    expect(screen.getByText(/3 of 3 transcription slots used/)).toBeInTheDocument()
-    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft')
-    act(() => socket().emit({ type: 'state.updated', state: { ...full, revision: 3, recording: true, hands_free: true } }))
-    expect(screen.getByRole('button', { name: 'Stop recording' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled()
-  })
+it('bounds stalled initial handshakes and permits an explicit fresh retry after exhaustion', async () => {
+  vi.useFakeTimers()
+  render(<App />)
+  await act(async () => { await vi.advanceTimersByTimeAsync(32500) })
+  expect(FakeSocket.instances).toHaveLength(5)
+  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+  expect(FakeSocket.instances).toHaveLength(6)
+  act(() => backend.socket().ready())
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+})
 
-  it('enables retry after connection timeout without losing the draft', async () => {
-    vi.useFakeTimers()
-    render(<App />)
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this draft' } })
-    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeDisabled()
-    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
-    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    connect()
-    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft')
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
-  })
+it('never reopens capture after loss until the old client releases it, and exhausts safety checks', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  backend.fetchMock.mockImplementation(async (url, init) => String(url).endsWith('/state')
+    ? Response.json({ ...initialState, client_connected: false, capture_owned: true, recording: true })
+    : baseFetch(url, init))
+  vi.useFakeTimers()
+  act(() => backend.socket().close())
+  await act(async () => { await vi.advanceTimersByTimeAsync(14000) })
+  expect(screen.getByText('Recording stop is unconfirmed')).toBeInTheDocument()
+  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(FakeSocket.instances).toHaveLength(1)
+  expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
+})
 
-  it('shows initial recording and transcription failures without treating history as current unavailability', async () => {
-    const { container } = render(<App />)
-    const errors = {
-      recording: { recording_id: null, conversation_id: 'local-draft', message: 'Earlier recording failed.', occurred_at: '2026-04-15T12:30:00.123456+00:00' },
-      transcription: { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00+00:00' },
+it('preserves a local draft when another tab deletes its selected conversation', async () => {
+  await open()
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Recover after deletion' } })
+  backend.conversations.delete('chat-1')
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await screen.findByText('Recovered unsaved drafts from unavailable conversations')
+  expect(screen.getByText('Recover after deletion')).toBeInTheDocument()
+  expect(backend.socket().closed).toBe(false)
+})
+
+it('does not let a delayed draft-save response resurrect finished messages as streaming', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | null = null
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    // Hold the accepted-draft clear; its response snapshots the streaming placeholder.
+    if (init?.method === 'PATCH' && JSON.parse(String(init.body)).draft === '' && release === null) {
+      return new Promise<Response>((resolve) => { release = () => resolve(response) })
     }
-    act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors } }))
-    await screen.findByText('Previous recording error')
-    await screen.findByText('Previous transcription error')
-    expect(screen.getByText('Earlier recording failed.')).toBeInTheDocument()
-    expect(screen.getByText('recording-previous')).toBeInTheDocument()
-    expect([...container.querySelectorAll('time')].map((time) => time.getAttribute('datetime'))).toContain(errors.recording.occurred_at)
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
-    expect(screen.queryByText('Recording backend is unavailable')).not.toBeInTheDocument()
+    return response
   })
+  backend.holdChats()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  await waitFor(() => expect(release).not.toBeNull())
+  act(() => backend.delta('chat-1', 'Full authoritative answer'))
+  await screen.findByText('Full authoritative answer')
+  act(() => backend.done('chat-1'))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop generation' })).not.toBeInTheDocument())
+  await act(async () => release!())
+  await waitFor(() => expect(screen.getByText('Full authoritative answer')).toBeInTheDocument())
+  expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+})
 
-  it('keeps a dismissed historical failure dismissed across state updates and reconnect', async () => {
-    render(<App />)
-    const errors = {
-      recording: null,
-      transcription: { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00Z' },
+it('retires an orphaned overlay after a failed final reload once authoritative history recovers', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let storeBusy = false
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if (storeBusy && (init?.method ?? 'GET') !== 'PATCH' && String(url).endsWith('/conversations/chat-1')) {
+      storeBusy = false
+      return Response.json({ detail: 'Store busy' }, { status: 503 })
     }
-    act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors } }))
-    await userEvent.click(await screen.findByRole('button', { name: 'Dismiss' }))
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, errors } }))
-    await waitFor(() => expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument())
-    act(() => socket().close())
-    await screen.findByText('Backend confirmed recording stopped')
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    act(() => socket().emit({ type: 'session.ready', session_id: 'new-session', state: { ...initialState, errors } }))
-    await waitFor(() => expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument())
-    act(() => socket().emit({ type: 'transcription.error', message: 'Earlier transcription failed.' }))
-    expect(await screen.findByText('Something went wrong')).toBeInTheDocument()
-    expect(await screen.findByText('Earlier transcription failed.')).toBeInTheDocument()
+    return baseFetch(url, init)
   })
+  backend.holdChats()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  act(() => backend.delta('chat-1', 'Partial answer'))
+  await screen.findByText('Partial answer')
+  storeBusy = true
+  act(() => backend.interrupt('chat-1'))
+  await screen.findAllByText('failed · partial reply')
+  const saved = backend.conversations.get('chat-1')!
+  saved.messages = [
+    { id: 'authoritative-user', role: 'user', content: 'Saved words', status: 'complete', metrics: null, created_at: '2026-01-01T00:00:00Z' },
+    { id: 'authoritative-assistant', role: 'assistant', content: 'Full authoritative answer', status: 'complete', metrics: { elapsed_seconds: 1 }, created_at: '2026-01-01T00:00:00Z' },
+  ]
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await screen.findByText('Full authoritative answer')
+  expect(screen.queryByText('Partial answer')).not.toBeInTheDocument()
+  expect(screen.queryByText('failed · partial reply')).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+})
 
-  it('shows a different failure on reconnect even after an older failure was dismissed', async () => {
-    render(<App />)
-    const failure = { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00Z' }
-    act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors: { recording: null, transcription: failure } } }))
-    await userEvent.click(await screen.findByRole('button', { name: 'Dismiss' }))
-    act(() => socket().close())
-    await screen.findByText('Backend confirmed recording stopped')
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    act(() => socket().emit({
-      type: 'session.ready', session_id: 'new-session',
-      state: { ...initialState, errors: { recording: null, transcription: { ...failure, recording_id: 'recording-new', occurred_at: '2026-04-15T12:32:00Z' } } },
-    }))
-    await screen.findByText('Previous transcription error')
-    expect(await screen.findByText('recording-new')).toBeInTheDocument()
+it('keeps a newly created conversation selected when an older library refresh lands late', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | null = null
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if ((init?.method ?? 'GET') === 'GET' && String(url).endsWith('/conversations')) {
+      const response = await baseFetch(url, init)
+      if (release === null) return new Promise<Response>((resolve) => { release = () => resolve(response) })
+      return response
+    }
+    return baseFetch(url, init)
   })
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await waitFor(() => expect(release).not.toBeNull())
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  await act(async () => release!())
+  expect(screen.getByRole('button', { name: 'Select New conversation' })).toHaveAttribute('aria-current', 'page')
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-2' }))
+  await act(async () => { await Promise.resolve(); await Promise.resolve() })
+  expect(screen.getByRole('button', { name: 'Select New conversation' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('button', { name: 'Select First chat' })).not.toHaveAttribute('aria-current')
+})
 
-  it('appends a transcript without replacing typed text or inserting duplicates', async () => {
-    render(<App />)
-    connect()
-    await userEvent.type(screen.getByRole('textbox'), 'Typed draft')
-    const event = { type: 'transcription.completed', recording_id: 'recording-1', conversation_id: 'local-draft', text: 'Spoken words.' }
-    act(() => { socket().emit(event); socket().emit(event) })
-    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Typed draft\nSpoken words.'))
-    act(() => socket().emit({ ...event, recording_id: 'other', conversation_id: 'another-conversation' }))
-    expect(screen.getByRole('textbox')).toHaveValue('Typed draft\nSpoken words.')
+it('merges each dictated append once across repeated reloads during a delayed save', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | null = null
+  let detailReads = 0
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if ((init?.method ?? 'GET') === 'GET' && String(url).endsWith('/conversations/chat-1')) detailReads++
+    if (init?.method === 'PATCH' && JSON.parse(String(init.body)).draft === 'First edit') {
+      return new Promise<Response>((resolve) => { release = () => resolve(response) })
+    }
+    return response
   })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'First edit' } })
+  await waitFor(() => expect(release).not.toBeNull())
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Latest edit' } })
+  const saved = backend.conversations.get('chat-1')!
+  saved.draft = 'First edit\nDictated once'; saved.draft_version++
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Latest edit\nDictated once'))
+  const readsBeforeRepeat = detailReads
+  await act(async () => {
+    backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' })
+    await Promise.resolve(); await Promise.resolve()
+  })
+  await waitFor(() => expect(detailReads).toBeGreaterThan(readsBeforeRepeat))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Latest edit\nDictated once')
+  // A second real append must still merge, even though the same save is pending.
+  saved.draft += '\nNext dictation'; saved.draft_version++
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Latest edit\nDictated once\nNext dictation'))
+  await act(async () => release!())
+  await waitFor(() => expect(saved.draft).toBe('Latest edit\nDictated once\nNext dictation'))
+})
 
-  it('acknowledges only after transcripts are committed to the composer, including empty results', async () => {
-    render(<App />)
-    connect()
-    await userEvent.type(screen.getByRole('textbox'), 'Typed')
-    const owner = socket()
-    const send = owner.send.bind(owner)
-    vi.spyOn(owner, 'send').mockImplementation((data) => {
-      const message = JSON.parse(data)
-      if (message.type === 'transcript.ack') expect(screen.getByRole('textbox')).toHaveValue('Typed\nSpoken')
-      send(data)
-    })
-    act(() => {
-      owner.emit({ type: 'transcription.completed', recording_id: 'one', conversation_id: 'local-draft', text: 'Spoken' })
-      owner.emit({ type: 'transcription.completed', recording_id: 'empty', conversation_id: 'local-draft', text: '' })
-    })
-    await waitFor(() => expect(owner.sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack').map((message) => message.recording_id)).toEqual(['one', 'empty']))
+it('keeps a failed partial reply when another conversation reloads, until its own history recovers', async () => {
+  backend.conversations.set('chat-2', { ...backend.conversations.get('chat-1')!, id: 'chat-2', title: 'Second chat', draft: 'Second draft', messages: [] })
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let failFirstChat = false
+  let detailReads = 0
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if ((init?.method ?? 'GET') === 'GET' && String(url).endsWith('/conversations/chat-1')) {
+      detailReads++
+      if (failFirstChat) return Response.json({ detail: 'Store busy' }, { status: 503 })
+    }
+    return baseFetch(url, init)
   })
+  backend.holdChats()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  await waitFor(() => expect(backend.conversations.get('chat-1')!.draft).toBe(''))
+  const readsBeforeCache = detailReads
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await waitFor(() => expect(detailReads).toBeGreaterThan(readsBeforeCache))
+  act(() => backend.delta('chat-1', 'Partial answer'))
+  await screen.findByText('Partial answer')
+  failFirstChat = true
+  act(() => backend.interrupt('chat-1'))
+  await screen.findAllByText('failed · partial reply')
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop generation' })).not.toBeInTheDocument())
+  fireEvent.click(screen.getByRole('button', { name: 'Select Second chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Second draft'))
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  await screen.findByText('Partial answer')
+  expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+  const saved = backend.conversations.get('chat-1')!
+  saved.messages = saved.messages.map((message) => ({ ...(message as Record<string, unknown>), status: 'complete', ...((message as Record<string, unknown>).role === 'assistant' ? { content: 'Full authoritative answer' } : {}) }))
+  failFirstChat = false
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await screen.findByText('Full authoritative answer')
+  expect(screen.queryByText('Partial answer')).not.toBeInTheDocument()
+})
 
-  it('retries a lost acknowledgement after reconnect without restoring text the user edited away', async () => {
-    render(<App />)
-    connect()
-    const owner = socket()
-    owner.autoAck = false
-    const transcript = { type: 'transcription.completed', recording_id: 'one', conversation_id: 'local-draft', text: 'Spoken' }
-    act(() => owner.emit(transcript))
-    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Spoken'))
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Edited instead' } })
-    act(() => owner.close())
-    await screen.findByText('Backend confirmed recording stopped')
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    act(() => socket().emit({ type: 'session.ready', session_id: 'replacement', state: initialState }))
-    expect(socket().sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack')).toHaveLength(1)
-    act(() => socket().emit(transcript))
-    expect(screen.getByRole('textbox')).toHaveValue('Edited instead')
-    expect(socket().sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack')).toHaveLength(2)
+it('preserves a failed partial reply when a delayed draft clear returns stale streaming history', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | null = null
+  let failHistory = false
+  let detailReads = 0
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if ((init?.method ?? 'GET') === 'GET' && String(url).endsWith('/conversations/chat-1')) {
+      detailReads++
+      if (failHistory) return Response.json({ detail: 'Store busy' }, { status: 503 })
+    }
+    const response = await baseFetch(url, init)
+    if (init?.method === 'PATCH' && JSON.parse(String(init.body)).draft === '' && release === null) {
+      return new Promise<Response>((resolve) => { release = () => resolve(response) })
+    }
+    return response
   })
-
-  it('appends a missed replay to the preserved draft and ignores other conversations', async () => {
-    render(<App />)
-    connect()
-    await userEvent.type(screen.getByRole('textbox'), 'Preserved')
-    act(() => socket().close())
-    await screen.findByText('Backend confirmed recording stopped')
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    connect()
-    act(() => {
-      socket().emit({ type: 'transcription.completed', recording_id: 'missed', conversation_id: 'local-draft', text: 'Offline words' })
-      socket().emit({ type: 'transcription.completed', recording_id: 'other', conversation_id: 'other-chat', text: 'Not here' })
-    })
-    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Preserved\nOffline words'))
-    expect(socket().sent.map((data) => JSON.parse(data)).filter((message) => message.type === 'transcript.ack').map((message) => message.recording_id)).toEqual(['missed'])
+  backend.holdChats()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('button', { name: 'Stop generation' })
+  await waitFor(() => expect(release).not.toBeNull())
+  const readsBeforeCache = detailReads
+  await act(async () => {
+    backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' })
+    await Promise.resolve(); await Promise.resolve()
   })
-
-  it('preserves the appended draft and closes safely when acknowledgement sending fails', async () => {
-    render(<App />)
-    connect()
-    const owner = socket()
-    vi.spyOn(owner, 'send').mockImplementation(() => { throw new Error('socket failed') })
-    act(() => owner.emit({ type: 'transcription.completed', recording_id: 'one', conversation_id: 'local-draft', text: 'Keep these words' }))
-    await screen.findByText('Backend confirmed recording stopped')
-    expect(owner.closed).toBe(true)
-    expect(screen.getByRole('textbox')).toHaveValue('Keep these words')
-  })
-
-  it('sends hold/release commands in order with the owner token', async () => {
-    render(<App />)
-    connect()
-    const button = screen.getByRole('button', { name: 'Hold to record' })
-    fireEvent.keyDown(button, { key: ' ' })
-    fireEvent.keyDown(button, { key: ' ', repeat: true })
-    fireEvent.keyUp(button, { key: ' ' })
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8765/recording/press')
-    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://127.0.0.1:8765/recording/release')
-    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
-      headers: { 'X-Session-ID': 'test-session' },
-      body: JSON.stringify({ conversation_id: 'local-draft' }),
-    })
-  })
-
-  it('provides an accessible hands-free action', async () => {
-    render(<App />)
-    connect()
-    await userEvent.click(screen.getByRole('button', { name: 'Record hands-free' }))
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8765/recording/hands-free')
-    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({ conversation_id: 'local-draft' }))
-  })
-
-  it('shows pending commands while still allowing the matching release', async () => {
-    let acceptPress: (response: Response) => void = () => {}
-    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { acceptPress = resolve }))
-    render(<App />)
-    connect()
-    const button = screen.getByRole('button', { name: 'Hold to record' })
-    fireEvent.keyDown(button, { key: ' ' })
-    fireEvent.keyUp(button, { key: ' ' })
-    expect(screen.getByText('Sending recording controls…')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    await act(async () => { acceptPress(new Response(null, { status: 202 })) })
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    await waitFor(() => expect(screen.queryByText('Sending recording controls…')).not.toBeInTheDocument())
-  })
-
-  it('treats a connection.error event as fatal even before the socket closes', async () => {
-    render(<App />)
-    connect()
-    const owner = socket()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my draft' } })
-    act(() => owner.emit({ type: 'connection.error', message: 'Client could not keep up; reconnect.' }))
-    await screen.findByText('Backend confirmed recording stopped')
-    expect(owner.closed).toBe(true)
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    expect(screen.getByRole('textbox')).toHaveValue('Keep my draft')
-    expect(screen.getByText('Client could not keep up; reconnect.')).toBeInTheDocument()
-  })
-
-  it('closes the session after a failed release and drops queued presses', async () => {
-    fetchMock.mockImplementation(async (url, init) => {
-      if (String(url).endsWith('/release')) throw new TypeError('Network request failed')
-      return defaultFetch(url, init)
-    })
-    render(<App />)
-    connect()
-    const owner = socket()
-    const button = screen.getByRole('button', { name: 'Hold to record' })
-    fireEvent.keyDown(button, { key: ' ' })
-    fireEvent.keyUp(button, { key: ' ' })
-    fireEvent.keyDown(button, { key: ' ' })
-    fireEvent.keyUp(button, { key: ' ' })
-    await screen.findByText('Backend confirmed recording stopped')
-    expect(owner.closed).toBe(true)
-    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST').map((call) => call[0])).toEqual([
-      'http://127.0.0.1:8765/recording/press',
-      'http://127.0.0.1:8765/recording/release',
-    ])
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    expect(await screen.findByText('Network request failed')).toBeInTheDocument()
-  })
-
-  it.each([403, 503, 500, 'timeout'] as const)('closes the owner session on %s command failure', async (failure) => {
-    fetchMock.mockImplementation(async (url, init) => {
-      if (init?.method !== 'POST') return defaultFetch(url, init)
-      if (failure === 'timeout') throw new DOMException('Request timed out', 'TimeoutError')
-      return new Response(null, { status: failure })
-    })
-    render(<App />)
-    connect()
-    const owner = socket()
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Hold to record' }), { key: ' ' })
-    await screen.findByText('Backend confirmed recording stopped')
-    expect(owner.closed).toBe(true)
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-  })
-
-  it('does not claim recording stopped when the backend cannot confirm it', async () => {
-    fetchMock.mockImplementation(async () => { throw new TypeError('Backend unreachable') })
-    render(<App />)
-    connect()
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Hold to record' }), { key: ' ' })
-    expect(await screen.findByText('Recording stop is unconfirmed', {}, { timeout: 3000 })).toBeInTheDocument()
-    expect(screen.queryByText('Backend confirmed recording stopped')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    expect(await screen.findByText('Recording stop is unconfirmed', {}, { timeout: 3000 })).toBeInTheDocument()
-    expect(FakeSocket.instances).toHaveLength(1)
-  })
-
-  it('recovers from disconnect while holding and requires a fresh press after reconnect', async () => {
-    render(<App />)
-    connect()
-    const button = screen.getByRole('button', { name: 'Hold to record' })
-    fireEvent.keyDown(button, { key: ' ' })
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    act(() => socket().close())
-    await screen.findByText('Backend confirmed recording stopped')
-    fireEvent.keyUp(button, { key: ' ' })
-    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(1)
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    act(() => socket().emit({ type: 'session.ready', session_id: 'new-session', state: initialState }))
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Hold to record' }), { key: ' ' })
-    fireEvent.keyUp(screen.getByRole('button', { name: 'Hold to record' }), { key: ' ' })
-    await waitFor(() => expect(fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(3))
-    const posts = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')
-    expect(posts[1]?.[1]?.headers).toMatchObject({ 'X-Session-ID': 'new-session' })
-  })
-
-  it('ignores older snapshots and shows backend errors', async () => {
-    render(<App />)
-    connect()
-    act(() => {
-      socket().emit({ type: 'state.updated', state: { ...initialState, revision: 3, recording: true, recording_id: 'recording-1' } })
-      socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2 } })
-    })
-    expect(screen.getByRole('button', { name: 'Release to stop' })).toBeInTheDocument()
-    act(() => socket().emit({ type: 'recording.error', message: 'Microphone permission denied.' }))
-    expect(await screen.findByText('Microphone permission denied.')).toBeInTheDocument()
-  })
-
-  it('keeps Fn off by default and enables it only through the owner endpoint', async () => {
-    render(<App />)
-    const toggle = screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })
-    expect(toggle).not.toBeChecked()
-    expect(toggle).toBeDisabled()
-    connect()
-    expect(toggle).toBeEnabled()
-    await userEvent.click(toggle)
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8765/shortcuts/fn')
-    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
-      headers: { 'X-Session-ID': 'test-session' },
-      body: JSON.stringify({ enabled: true, conversation_id: 'local-draft' }),
-    })
-    // HTTP acceptance is not confirmation that the native listener started.
-    expect(toggle).not.toBeChecked()
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, fn_shortcut: { status: 'starting', error: null } } }))
-    expect(toggle).toBeChecked()
-    expect(screen.getByText(/Enabling keyboard capture/)).toBeInTheDocument()
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 3, fn_shortcut: { status: 'enabled', error: null } } }))
-    expect(toggle).toBeChecked()
-    await waitFor(() => expect(toggle).toBeEnabled())
-    await userEvent.click(toggle)
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({ enabled: false, conversation_id: 'local-draft' }))
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 4 } }))
-    expect(toggle).not.toBeChecked()
-  })
-
-  it('shows Fn permission errors without disabling on-screen recording or losing text', async () => {
-    render(<App />)
-    connect()
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my draft' } })
-    act(() => socket().emit({
-      type: 'state.updated',
-      state: { ...initialState, revision: 2, fn_shortcut: { status: 'failed', error: 'Allow Accessibility for your terminal, then restart the backend.' } },
-    }))
-    expect(await screen.findByText('Allow Accessibility for your terminal, then restart the backend.')).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
-    expect(screen.getByRole('textbox')).toHaveValue('Keep my draft')
-  })
-
-  it('reflects Fn recording in the same controls and stops it from the UI', async () => {
-    render(<App />)
-    connect()
-    act(() => socket().emit({
-      type: 'state.updated',
-      state: { ...initialState, revision: 2, recording: true, hands_free: true, recording_id: 'fn-recording', fn_shortcut: { status: 'enabled', error: null } },
-    }))
-    expect(screen.getByRole('button', { name: 'Stop recording' })).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeChecked()
-    await userEvent.click(screen.getByRole('button', { name: 'Stop' }))
-    await waitFor(() => expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8765/recording/stop'))
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 3, fn_shortcut: { status: 'enabled', error: null } } }))
-    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeChecked()
-  })
-
-  it('resets Fn on reconnect without automatically opting the new session in', async () => {
-    render(<App />)
-    connect()
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, fn_shortcut: { status: 'enabled', error: null } } }))
-    act(() => socket().close())
-    await screen.findByText('Backend confirmed recording stopped')
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeDisabled()
-    await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-    act(() => socket().emit({ type: 'session.ready', session_id: 'new-session', state: initialState }))
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
-    expect(fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(0)
-  })
-
-  it('allows disabling Fn during microphone startup', async () => {
-    render(<App />)
-    connect()
-    act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, pending_commands: 1, fn_shortcut: { status: 'enabled', error: null } } }))
-    const toggle = screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })
-    expect(toggle).toBeEnabled()
-    await userEvent.click(toggle)
-    await waitFor(() => expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({ enabled: false, conversation_id: 'local-draft' })))
-  })
-
-  it('closes the owner session if a shortcut command fails', async () => {
-    fetchMock.mockImplementation(async (url, init) => init?.method === 'POST'
-      ? new Response(null, { status: 403 })
-      : defaultFetch(url, init))
-    render(<App />)
-    connect()
-    const owner = socket()
-    await userEvent.click(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' }))
-    await screen.findByText('Backend confirmed recording stopped')
-    expect(owner.closed).toBe(true)
-    expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeDisabled()
-  })
-
-  it('explains when another tab owns the session', () => {
-    render(<App />)
-    act(() => socket().onclose?.({ code: 1008 }))
-    expect(screen.getByText('Another tab is using the microphone session')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeEnabled()
-  })
+  await waitFor(() => expect(detailReads).toBeGreaterThan(readsBeforeCache))
+  act(() => backend.delta('chat-1', 'Partial answer'))
+  await screen.findByText('Partial answer')
+  failHistory = true
+  act(() => backend.interrupt('chat-1'))
+  await screen.findAllByText('failed · partial reply')
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop generation' })).not.toBeInTheDocument())
+  await act(async () => release!())
+  expect(screen.getByText('Partial answer')).toBeInTheDocument()
+  expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Next question' } })
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled()
+  const saved = backend.conversations.get('chat-1')!
+  saved.messages = saved.messages.map((message) => ({ ...(message as Record<string, unknown>), status: 'complete', ...((message as Record<string, unknown>).role === 'assistant' ? { content: 'Full authoritative answer' } : {}) }))
+  failHistory = false
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await screen.findByText('Full authoritative answer')
+  expect(screen.queryByText('Partial answer')).not.toBeInTheDocument()
 })

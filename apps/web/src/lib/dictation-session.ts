@@ -1,300 +1,192 @@
 import { eventSchema } from './protocol'
 import { createHeartbeat } from './session-heartbeat'
 import { confirmRecordingStopped } from './recording-safety'
-import type { PastError, Snapshot, Transcript } from './protocol'
+import { HTTP_URL, WS_URL } from './backend-url'
+import type { Snapshot } from './protocol'
 
-const HTTP_URL = 'http://127.0.0.1:8765'
-const WS_URL = 'ws://127.0.0.1:8765/events'
-export const CONVERSATION_ID = 'local-draft'
-
-export type Connection = 'connecting' | 'connected' | 'disconnected' | 'in-use'
-export type Action = 'press' | 'release' | 'stop' | 'hands-free'
-export type BackendCommand = { action: Action } | { action: 'fn'; enabled: boolean }
+export type Connection = 'connecting' | 'connected' | 'retrying' | 'exhausted'
 export type Safety = 'none' | 'stopping' | 'stopped' | 'unconfirmed'
-
 type SessionEvents = {
   connectionChanged: (connection: Connection) => void
   snapshotChanged: (snapshot: Snapshot | null) => void
-  transcriptReceived: (transcript: Transcript) => void
+  conversationChanged: (id: string) => Promise<boolean>
+  connected: () => void
   errorChanged: (error: string | null) => void
-  pastErrorsChanged: (errors: PastError[]) => void
-  pendingCommandsChanged: (update: (count: number) => number) => void
+  pendingCommandsChanged: (pending: boolean) => void
   safetyChanged: (safety: Safety) => void
 }
+const BACKOFF = [500, 1000, 2000, 4000]
 
-/** Owns browser/backend session ordering; React consumes its observable updates. */
+/** One unscoped connection per tab; selecting a conversation never replaces it. */
 export class DictationSession {
   private sessionId: string | null = null
+  private oldSessionId: string | null = null
   private socket: WebSocket | null = null
-  private latestRevision = -1
-  private readonly delivered = new Set<string>()
-  private readonly applied = new Set<string>()
-  private readonly pendingAcknowledgements = new Set<string>()
-  private readonly acknowledgementsInFlight = new Set<string>()
-  private flushingAcknowledgements = false
-  private commands: Promise<unknown> = Promise.resolve()
-  private activeRequest: AbortController | null = null
-  private recovering = false
-  private generation = 0
+  private heartbeat: ReturnType<typeof createHeartbeat> | null = null
+  private timer: ReturnType<typeof setTimeout> | null = null
   private mounted = false
-  private safety: Safety = 'none'
-  private readonly dismissedErrors = new Set<string>()
-  private pastErrors: PastError[] = []
-  private readonly events: SessionEvents
-
-  constructor(events: SessionEvents) {
-    this.events = events
-  }
-
-  get currentSessionId() {
-    return this.sessionId
-  }
-
-  start(): () => void {
-    let active = true
-    let established = false
-    let heartbeat: ReturnType<typeof createHeartbeat> | null = null
+  private epoch = 0
+  private failures = 0
+  private latestRevision = -1
+  private pending = false
+  private acknowledgements = new Map<string, string>()
+  private acknowledgementsInFlight = new Set<string>()
+  private flushingAcknowledgements = false
+  private reloading = new Set<string>()
+  private events: SessionEvents
+  constructor(events: SessionEvents) { this.events = events }
+  get currentSessionId() { return this.sessionId }
+  start() {
     this.mounted = true
-    this.generation += 1
-    this.sessionId = null
-    this.latestRevision = -1
-    const socket = new WebSocket(`${WS_URL}?conversation_id=${encodeURIComponent(CONVERSATION_ID)}`)
+    this.failures = 0
+    void this.connect()
+    const resume = () => { if (!document.hidden) this.heartbeat?.ping() }
+    document.addEventListener('visibilitychange', resume)
+    window.addEventListener('pageshow', resume)
+    return () => {
+      this.mounted = false; this.epoch++
+      if (this.timer) clearTimeout(this.timer)
+      this.heartbeat?.stop()
+      this.socket?.close(); this.sessionId = null
+      document.removeEventListener('visibilitychange', resume)
+      window.removeEventListener('pageshow', resume)
+    }
+  }
+  private async connect() {
+    if (!this.mounted) return
+    const epoch = ++this.epoch
+    this.events.connectionChanged(this.failures ? 'retrying' : 'connecting')
+    if (this.oldSessionId) {
+      this.events.safetyChanged('stopping')
+      const stopped = await confirmRecordingStopped(HTTP_URL, this.oldSessionId)
+      if (!this.mounted || epoch !== this.epoch) return
+      this.events.safetyChanged(stopped ? 'stopped' : 'unconfirmed')
+      if (!stopped) { this.scheduleRetry(); return }
+      this.oldSessionId = null
+    }
+    this.events.safetyChanged('none')
+    let socket: WebSocket
+    try { socket = new WebSocket(WS_URL) } catch { this.scheduleRetry(); return }
     this.socket = socket
-
-    const connectionTimer = setTimeout(() => {
-      if (!active || established) return
-      active = false
-      this.sessionId = null
-      this.events.snapshotChanged(null)
-      this.events.connectionChanged('disconnected')
-      this.events.errorChanged('Connection timed out after 5 seconds. Check the backend and reconnect.')
-      socket.close()
-    }, 5000)
-
+    this.latestRevision = -1
+    this.timer = setTimeout(() => { if (epoch === this.epoch) void this.lost('Connection timed out.') }, 5000)
     socket.onmessage = (message) => {
-      if (!active || this.recovering) return
+      if (!this.mounted || epoch !== this.epoch) return
       let decoded: unknown
-      try {
-        decoded = JSON.parse(String(message.data))
-      } catch {
-        this.events.errorChanged('The backend sent an unreadable event.')
-        return
-      }
+      try { decoded = JSON.parse(String(message.data)) } catch { return }
       const parsed = eventSchema.safeParse(decoded)
       if (!parsed.success) return
       const event = parsed.data
-      if (!established && event.type !== 'session.ready') return
-      if (event.type === 'session.ready' || event.type === 'state.updated') {
-        if (event.type === 'session.ready') {
-          if (established) return
-          established = true
-          clearTimeout(connectionTimer)
-          this.sessionId = event.session_id
-          this.acknowledgementsInFlight.clear()
-          this.events.connectionChanged('connected')
-          this.events.errorChanged(null)
-          heartbeat = createHeartbeat(
-            (id) => socket.send(JSON.stringify({ type: 'session.ping', id })),
-            () => { void this.recover('The backend stopped responding. The session was closed to stop recording safely.') },
-          )
-          heartbeat.ping()
-          this.flushAcknowledgements()
-          if (!active || this.recovering) return
-          const previous: PastError[] = []
-          for (const kind of ['recording', 'transcription'] as const) {
-            const failure = event.state.errors[kind]
-            if (failure === null) continue
-            const id = JSON.stringify([kind, failure.recording_id, failure.occurred_at])
-            if (!this.dismissedErrors.has(id)) previous.push({ id, kind, failure })
-          }
-          this.pastErrors = previous
-          this.events.pastErrorsChanged(previous)
-        }
-        if (event.state.revision >= this.latestRevision) {
-          this.latestRevision = event.state.revision
-          this.events.snapshotChanged(event.state)
-        }
-      } else if (event.type === 'session.pong') {
-        heartbeat?.pong(event.id)
+      if (!this.sessionId && event.type !== 'session.ready') return
+      if (event.type === 'session.ready') {
+        if (this.sessionId) return
+        if (this.timer) clearTimeout(this.timer)
+        this.timer = null
+        this.sessionId = event.session_id
+        this.acknowledgementsInFlight.clear()
+        this.failures = 0
+        this.events.errorChanged(null)
+        this.events.connectionChanged('connected')
+        this.applySnapshot(event.state)
+        this.heartbeat = createHeartbeat((id) => socket.send(JSON.stringify({ type: 'session.ping', id })), () => { void this.lost('The backend stopped responding.') })
+        this.heartbeat.ping()
+        this.events.connected()
+        this.flushAcknowledgements()
+      } else if (event.type === 'state.updated') this.applySnapshot(event.state)
+      else if (event.type === 'session.pong') this.heartbeat?.pong(event.id)
+      else if (event.type === 'conversation.updated') void this.events.conversationChanged(event.conversation_id)
+      else if (event.type === 'transcription.completed' && event.conversation_id) {
+        const id = event.conversation_id
+        const key = JSON.stringify([event.recording_id, id])
+        if (this.reloading.has(key)) return
+        this.reloading.add(key)
+        // Backend has already persisted the transcript exactly once. Re-read, never append.
+        void this.events.conversationChanged(id).then((loaded) => {
+          if (loaded) { this.acknowledgements.set(event.recording_id, id); this.flushAcknowledgements() }
+        }).finally(() => this.reloading.delete(key))
       } else if (event.type === 'transcript.acknowledged') {
-        if (event.conversation_id === CONVERSATION_ID) {
-          this.pendingAcknowledgements.delete(event.recording_id)
+        if (this.acknowledgements.get(event.recording_id) === event.conversation_id) {
+          this.acknowledgements.delete(event.recording_id)
           this.acknowledgementsInFlight.delete(event.recording_id)
           this.flushAcknowledgements()
         }
-      } else if (event.type === 'transcription.completed') {
-        if (event.conversation_id !== CONVERSATION_ID) return
-        if (this.delivered.has(event.recording_id)) {
-          if (this.applied.has(event.recording_id)) {
-            this.pendingAcknowledgements.add(event.recording_id)
-            this.acknowledgeTranscript(event.recording_id)
-          }
-          return
-        }
-        this.delivered.add(event.recording_id)
-        this.events.transcriptReceived({ recordingId: event.recording_id, text: event.text })
-      } else if (event.type === 'connection.error') {
-        void this.recover(event.message)
-      } else {
-        this.events.errorChanged(event.message)
-      }
+      } else if (event.type === 'connection.error') void this.lost(event.message)
+      else if ('message' in event) this.events.errorChanged(event.message)
     }
-
-    socket.onclose = (event) => {
-      if (!active) return
-      active = false
-      clearTimeout(connectionTimer)
-      heartbeat?.stop()
-      const hadSession = this.sessionId !== null
-      this.sessionId = null
-      this.events.snapshotChanged(null)
-      this.events.connectionChanged(event.code === 1008 ? 'in-use' : 'disconnected')
-      if (hadSession) void this.recover('Connection lost. The session was closed to stop recording safely.')
-    }
-    socket.onerror = () => {
-      if (!active || this.recovering) return
-      this.events.errorChanged('Could not connect to the local backend.')
-      if (!established) {
-        active = false
-        clearTimeout(connectionTimer)
-        this.events.connectionChanged('disconnected')
-        socket.close()
-      }
-    }
-    const resume = () => { if (active && established && !document.hidden && !this.recovering) heartbeat?.ping() }
-    document.addEventListener('visibilitychange', resume)
-    window.addEventListener('pageshow', resume)
-
-    return () => {
-      active = false
-      clearTimeout(connectionTimer)
-      heartbeat?.stop()
-      document.removeEventListener('visibilitychange', resume)
-      window.removeEventListener('pageshow', resume)
-      this.mounted = false
-      this.sessionId = null
-      this.activeRequest?.abort()
-      socket.close()
+    socket.onclose = () => { if (epoch === this.epoch) void this.lost('Connection lost. Local edits are retained.') }
+    socket.onerror = () => { if (epoch === this.epoch) void this.lost('Could not connect to the local backend.') }
+  }
+  private applySnapshot(snapshot: Snapshot) {
+    if (snapshot.revision >= this.latestRevision) {
+      this.latestRevision = snapshot.revision; this.events.snapshotChanged(snapshot)
     }
   }
-
-  private async recover(message: string) {
-    if (this.recovering) return
-    this.recovering = true
-    const currentGeneration = this.generation
+  private async lost(message: string) {
+    if (!this.mounted) return
+    this.epoch++ // invalidate socket callbacks before closing
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = null
+    this.heartbeat?.stop(); this.heartbeat = null
+    this.oldSessionId = this.sessionId ?? this.oldSessionId
     this.sessionId = null
-    this.activeRequest?.abort()
-    this.events.errorChanged(message)
-    this.setSafety('stopping')
     this.events.snapshotChanged(null)
-    this.events.connectionChanged('disconnected')
+    this.events.errorChanged(message)
     this.socket?.close()
-    const stopped = await confirmRecordingStopped(HTTP_URL)
-    if (this.mounted && this.generation === currentGeneration) this.setSafety(stopped ? 'stopped' : 'unconfirmed')
+    this.scheduleRetry()
   }
-
+  private scheduleRetry() {
+    if (!this.mounted) return
+    const delay = BACKOFF[this.failures++]
+    if (delay === undefined) {
+      this.events.connectionChanged('exhausted')
+      this.events.errorChanged('Automatic connection retries exhausted. Your selected conversation and local edits are retained. Reconnect to try again.')
+      return
+    }
+    this.events.connectionChanged('retrying')
+    this.timer = setTimeout(() => { this.timer = null; void this.connect() }, delay)
+  }
+  reconnect() {
+    if (this.timer) clearTimeout(this.timer)
+    this.epoch++; this.heartbeat?.stop(); this.socket?.close()
+    this.oldSessionId = this.sessionId ?? this.oldSessionId; this.sessionId = null
+    this.failures = 0
+    void this.connect()
+  }
   private flushAcknowledgements() {
-    if (!this.sessionId || this.recovering || this.flushingAcknowledgements) return
+    if (!this.sessionId || this.flushingAcknowledgements) return
     this.flushingAcknowledgements = true
     try {
-      for (const recordingId of this.pendingAcknowledgements) {
+      for (const [recordingId, conversationId] of this.acknowledgements) {
         if (this.acknowledgementsInFlight.size >= 16) break
         if (this.acknowledgementsInFlight.has(recordingId)) continue
         this.acknowledgementsInFlight.add(recordingId)
-        this.socket?.send(JSON.stringify({ type: 'transcript.ack', recording_id: recordingId, conversation_id: CONVERSATION_ID }))
+        this.socket?.send(JSON.stringify({ type: 'transcript.ack', recording_id: recordingId, conversation_id: conversationId }))
       }
-    } catch {
-      void this.recover('Transcript acknowledgement failed. Reconnect to retry delivery safely.')
-    } finally {
-      this.flushingAcknowledgements = false
-    }
+    } catch { void this.lost('Transcript acknowledgement failed; reconnecting to retry.') }
+    finally { this.flushingAcknowledgements = false }
   }
-
-  acknowledgeTranscript(recordingId: string) {
-    if (this.applied.has(recordingId) && !this.pendingAcknowledgements.has(recordingId)) return
-    this.applied.add(recordingId)
-    this.pendingAcknowledgements.add(recordingId)
-    this.flushAcknowledgements()
-  }
-
-  dismissPastError(id: string) {
-    this.dismissedErrors.add(id)
-    this.pastErrors = this.pastErrors.filter((item) => item.id !== id)
-    this.events.pastErrorsChanged(this.pastErrors)
-  }
-
-  sendCommand(request: BackendCommand) {
-    const action = request.action
+  async command(action: 'start' | 'stop', conversationId: string) {
     const token = this.sessionId
-    if (!token || this.recovering) return Promise.resolve(false)
-    this.events.pendingCommandsChanged((count) => count + 1)
-    const task = this.commands.then(async () => {
-      if (this.sessionId !== token || this.recovering) return false
-      const controller = new AbortController()
-      this.activeRequest = controller
-      try {
-        const response = await fetch(`${HTTP_URL}${action === 'fn' ? '/shortcuts/fn' : `/recording/${action}`}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Session-ID': token },
-          body: request.action === 'fn'
-            ? JSON.stringify({ enabled: request.enabled, conversation_id: CONVERSATION_ID })
-            : action === 'press' || action === 'hands-free' ? JSON.stringify({ conversation_id: CONVERSATION_ID }) : undefined,
-          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
-        })
-        if (this.sessionId !== token || this.recovering) return false
-        if (!response.ok) {
-          if (response.status === 429 && (action === 'press' || action === 'hands-free')) {
-            this.events.errorChanged('Transcription capacity is full. Wait for a job to finish before recording again.')
-            return false
-          }
-          if (response.status === 403) throw new Error('The recording session has expired.')
-          if (response.status === 503) throw new Error('Recording workers are unavailable. Check or restart the backend.')
-          throw new Error(`Recording command failed (${response.status}).`)
-        }
-        return true
-      } catch (failure) {
-        if (this.sessionId === token && !this.recovering && this.mounted) {
-          await this.recover(failure instanceof Error ? failure.message : 'Recording command failed.')
-        }
-        return false
-      } finally {
-        this.activeRequest = null
-      }
-    }).finally(() => {
-      if (this.mounted) this.events.pendingCommandsChanged((count) => Math.max(0, count - 1))
-    })
-    this.commands = task
-    return task
-  }
-
-  reconnect(): boolean | Promise<boolean> {
-    if (this.safety === 'stopping') return false
-    if (this.safety === 'unconfirmed') {
-      this.setSafety('stopping')
-      return confirmRecordingStopped(HTTP_URL).then((stopped) => {
-        if (!this.mounted) return false
-        if (!stopped) {
-          this.setSafety('unconfirmed')
-          return false
-        }
-        return this.prepareReconnect()
+    if (!token || this.pending) return false
+    this.pending = true; this.events.pendingCommandsChanged(true)
+    try {
+      const response = await fetch(`${HTTP_URL}/recording/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': token },
+        body: action === 'start' ? JSON.stringify({ conversation_id: conversationId }) : undefined,
+        signal: AbortSignal.timeout(5000),
       })
+      if (this.sessionId !== token) return false
+      if (response.status === 409) { this.events.errorChanged('Microphone is occupied or a recording is already active.'); return false }
+      if (response.status === 429) { this.events.errorChanged('Transcription capacity is full. Wait before recording again.'); return false }
+      if (response.status === 404) { this.events.errorChanged('This conversation was deleted. Select another conversation.'); return false }
+      if (!response.ok) throw new Error(`Recording command failed (${response.status}).`)
+      return true
+    } catch (failure) {
+      if (this.sessionId === token) await this.lost(failure instanceof Error ? failure.message : 'Recording command failed.')
+      return false
+    } finally {
+      this.pending = false
+      if (this.mounted) this.events.pendingCommandsChanged(false)
     }
-    return this.prepareReconnect()
-  }
-
-  private prepareReconnect() {
-    this.recovering = false
-    this.sessionId = null
-    this.setSafety('none')
-    this.events.connectionChanged('connecting')
-    this.events.snapshotChanged(null)
-    this.events.errorChanged(null)
-    return true
-  }
-
-  private setSafety(safety: Safety) {
-    this.safety = safety
-    this.events.safetyChanged(safety)
   }
 }

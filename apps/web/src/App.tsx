@@ -1,198 +1,144 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { AudioLines, ArrowUp, Check, LoaderCircle, Plus, RefreshCw, Settings2, Sparkles } from 'lucide-react'
+import { useState } from 'react'
+import { AudioLines, ArrowUp, Check, Plus, RefreshCw, Sparkles } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
+import { useConversations } from '@/hooks/use-conversations'
 import { useChat } from '@/hooks/use-chat'
-import { Toaster, toast } from 'sonner'
+import type { ConversationDetail, ConversationLibrary } from '@/lib/conversations'
 import './chat-ui.css'
 
+function ConversationActions({ conversation, library, enabled }: {
+  conversation: ConversationDetail; library: ConversationLibrary; enabled: boolean
+}) {
+  const [title, setTitle] = useState(conversation.title)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  return <form className="conversation-actions" onSubmit={(event) => {
+    event.preventDefault()
+    void library.rename(conversation.id, title)
+  }}>
+    <label className="sr-only" htmlFor="conversation-title">Conversation title</label>
+    <input id="conversation-title" value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} />
+    <Button variant="outline" type="submit" disabled={!enabled || !title.trim()}>Rename conversation</Button>
+    <Button variant="ghost" type="button" onClick={() => setConfirmDelete(true)} disabled={!enabled}>Delete conversation</Button>
+    {confirmDelete && <span role="alert" className="delete-confirmation">
+      Delete this conversation and its saved content?
+      <Button type="button" variant="destructive" onClick={() => void library.delete(conversation.id)}>Confirm delete</Button>
+      <Button type="button" variant="ghost" onClick={() => setConfirmDelete(false)}>Keep conversation</Button>
+    </span>}
+  </form>
+}
+
 export default function App() {
-  const { sessionId, connection, snapshot, transcripts, acknowledgeTranscript, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, setFnEnabled, reconnect, dismissError } = useDictation()
-  const [composer, setComposer] = useState<{ text: string; appliedIds: string[] }>({ text: '', appliedIds: [] })
-  const draft = composer.text
-  const chat = useChat(sessionId)
-  const transcriptEnd = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (error) toast.error('Something went wrong', { description: error, id: 'dictation-error', duration: 10_000, onDismiss: dismissError, action: { label: 'Dismiss', onClick: dismissError } })
-  }, [error, dismissError])
-
-  useEffect(() => {
-    for (const { id, kind, failure } of pastErrors) {
-      toast.warning(`Previous ${kind} error`, {
-        id: `past-${id}`,
-        duration: 60_000,
-        description: <div className="toast-history-description">
-          <p>{failure.message}</p>
-          <p><time dateTime={failure.occurred_at}>{new Date(failure.occurred_at).toLocaleString()}</time></p>
-          {failure.recording_id && <p>Recording: <span className="break-all">{failure.recording_id}</span></p>}
-          <p>This happened before you connected.</p>
-        </div>,
-        onDismiss: () => dismissPastError(id),
-        action: { label: 'Dismiss', onClick: () => { dismissPastError(id); toast.dismiss(`past-${id}`) } },
-      })
-    }
-  }, [pastErrors, dismissPastError])
-
-  useEffect(() => {
-    if (chat.error) toast.error('Chat could not finish', { description: chat.error, id: 'chat-error', duration: 10_000, onDismiss: chat.dismissError, action: { label: 'Dismiss', onClick: chat.dismissError } })
-  }, [chat.error, chat.dismissError])
-
-  const backendUnavailable = connection === 'connected' && snapshot !== null && !snapshot.ready
-  useEffect(() => {
-    if (backendUnavailable) {
-      toast.error('Recording backend is unavailable', {
-        description: 'Check the backend terminal for errors. Restart it, then reconnect.',
-        id: 'backend-unavailable',
-        duration: 10_000,
-      })
-    } else {
-      toast.dismiss('backend-unavailable')
-    }
-  }, [backendUnavailable])
-
-  useEffect(() => {
-    const shortcutError = snapshot?.fn_shortcut.error
-    if (shortcutError) toast.error('Fn shortcut could not start', { description: shortcutError, id: 'fn-shortcut-error', duration: 10_000 })
-  }, [snapshot?.fn_shortcut.error])
-
-  const send = () => void chat.send(draft, () => {
-    // Do not erase edits or new dictation that arrived while Ollama was loading.
-    setComposer((previous) => previous.text === draft ? { ...previous, text: '' } : previous)
-  })
-  const newDraft = () => {
-    if (chat.busy) return
-    chat.clear()
-    setComposer({ text: '', appliedIds: [] })
+  const conversations = useConversations()
+  const dictation = useDictation(conversations.library)
+  const { library, selectedId, list, details, historyRevisions, drafts } = conversations
+  const selected = selectedId ? details[selectedId] : undefined
+  const draft = selectedId ? drafts[selectedId] : undefined
+  const chat = useChat(dictation.sessionId, selectedId, details, historyRevisions, library)
+  const [sending, setSending] = useState(false)
+  const connected = dictation.connection === 'connected'
+  const recording = dictation.snapshot?.capture_owned ?? false
+  const occupied = Boolean(dictation.snapshot?.recording && !recording)
+  const micEnabled = connected && dictation.safety === 'none' && (recording || Boolean(selected && dictation.snapshot?.ready && dictation.snapshot.capacity.available > 0))
+  const canSend = connected && Boolean(draft?.text.trim()) && draft?.conflict === null && !chat.busy && !sending
+  const recovered = Object.entries(drafts).filter(([id, item]) => !list.some((conversation) => conversation.id === id) && item.text !== item.base)
+  const send = async () => {
+    if (!selectedId || !draft || !canSend) return
+    const id = selectedId
+    const text = draft.text
+    setSending(true)
+    try {
+      if (!await library.save(id)) return
+      // An append/conflict during saving must be reviewed before sending.
+      if (library.getSnapshot().drafts[id]?.text !== text) return
+      void chat.send(id, text, () => { void library.clearAccepted(id, text) })
+    } finally { setSending(false) }
   }
-  const consumed = useRef(0)
-  const press = useCallback(() => command('press'), [command])
-  const release = useCallback(() => command('release'), [command])
-  const stop = useCallback(() => command('stop'), [command])
 
-  useEffect(() => {
-    const incoming = transcripts.slice(consumed.current)
-    consumed.current = transcripts.length
-    if (incoming.length) {
-      setComposer((previous) => ({
-        text: [previous.text, ...incoming.map((item) => item.text.trim())].filter(Boolean).join('\n'),
-        appliedIds: [...previous.appliedIds, ...incoming.map((item) => item.recordingId)],
-      }))
-    }
-  }, [transcripts])
-
-  useEffect(() => {
-    for (const id of composer.appliedIds) acknowledgeTranscript(id)
-  }, [composer.appliedIds, acknowledgeTranscript])
-
-  useEffect(() => {
-    const end = transcriptEnd.current
-    if (end && typeof end.scrollIntoView === 'function') end.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [chat.messages])
-
-  const connected = connection === 'connected'
-  const recording = snapshot?.recording ?? false
-  const processing = snapshot?.transcription.status === 'processing'
-  const queued = snapshot?.transcription.queued_jobs.length ?? 0
-  const controlsPending = pendingCommands > 0 || (snapshot?.pending_commands ?? 0) > 0
-  const enabled = connected && safety === 'none' && (snapshot?.ready ?? false)
-  const capacityFull = snapshot?.capacity.available === 0
-  // Keep the held pointer alive while a start reservation is pending.
-  const canStart = enabled && (!capacityFull || recording || controlsPending)
-  const canStop = connected && safety === 'none' && (recording || controlsPending)
-  const fnStatus = snapshot?.fn_shortcut.status ?? 'disabled'
-  const fnEnabled = fnStatus === 'enabled' || fnStatus === 'starting'
-  const status = recording ? 'Recording' : controlsPending ? 'Applying controls…' : processing ? 'Transcribing' : queued ? 'Queued' : enabled ? 'Ready' : 'Not ready'
-  const connectionLabel = connected ? 'Connected · local' : connection === 'connecting' ? 'Connecting…' : connection === 'in-use' ? 'In use in another tab' : 'Disconnected'
-
-  return (
-    <>
-    <Toaster position="top-right" richColors closeButton visibleToasts={4} />
-    <div className="chat-app">
-      <aside className="chat-sidebar">
-        <div className="chat-brand"><span className="chat-brand-mark"><AudioLines size={18} /></span><span>OutLoud</span></div>
-        <Button variant="outline" className="new-dictation" onClick={newDraft} disabled={chat.busy}>
-          <Plus /> New chat
-        </Button>
-        <div className="sidebar-section-label">WORKSPACE</div>
-        <div className="workspace-item active"><AudioLines size={16} /> Local chat</div>
-        <div className="sidebar-section-label recent-label">ABOUT THIS SESSION</div>
-        <p className="sidebar-note">Your conversation is kept in this page session. Audio and transcripts stay on this Mac.</p>
-        <div className="sidebar-bottom">
-          <details className="settings-details">
-            <summary><Settings2 size={16} /> Recording settings</summary>
-            <label className="fn-toggle">
-              <input type="checkbox" checked={fnEnabled} disabled={!connected || safety !== 'none' || pendingCommands > 0 || (!snapshot?.ready && !fnEnabled)} onChange={(event) => void setFnEnabled(event.target.checked)} aria-describedby="fn-help" />
-              <span>Enable Fn shortcut</span>
-            </label>
-            <p id="fn-help">{fnStatus === 'starting' ? 'Enabling keyboard capture…' : 'Hold Fn/Globe to record; double-tap for hands-free, then tap to stop.'} While enabled, Fn is captured across apps while this tab stays connected. Turning it off stops recording and restores its default action.</p>
-          </details>
-          <div className="profile-row"><span className="profile-avatar">L</span><span><b>Local workspace</b><small>Private on this Mac</small></span><Badge variant="outline" className="local-badge">LOCAL</Badge></div>
+  return <div className="chat-app">
+    <aside className="chat-sidebar">
+      <div className="chat-brand"><span className="chat-brand-mark"><AudioLines size={18} /></span><span>OutLoud</span></div>
+      <Button variant="outline" className="new-dictation" onClick={() => void library.create()} disabled={!connected}><Plus /> New chat</Button>
+      <div className="sidebar-section-label">CONVERSATIONS</div>
+      <nav aria-label="Conversations" className="conversation-library">
+        {list.map((item) => <button key={item.id} className={`workspace-item ${selectedId === item.id ? 'active' : ''}`} aria-label={`Select ${item.title}`} aria-current={selectedId === item.id ? 'page' : undefined} onClick={() => library.select(item.id)}>
+          <AudioLines size={16} /><span>{item.title}</span>
+        </button>)}
+      </nav>
+      <p className="sidebar-note">Conversations are saved on this Mac and shared across tabs. This tab remembers its selected chat.</p>
+      <div className="sidebar-bottom"><div className="profile-row"><span className="profile-avatar">L</span><span><b>Local workspace</b><small>Private on this Mac</small></span></div></div>
+    </aside>
+    <main className="chat-main">
+      <header className="chat-topbar">
+        <div className="conversation-title">{selected?.title ?? 'Choose a conversation'} <span className="model-label">· Gemma</span></div>
+        <div className="topbar-status" role="status">{connected ? 'Connected · local' : dictation.connection === 'exhausted' ? 'Connection retries exhausted' : dictation.connection === 'retrying' ? 'Reconnecting with backoff…' : 'Connecting…'}</div>
+      </header>
+      <div className="chat-content">
+        <div className="session-alerts">
+          {!connected && <Alert className="session-alert">
+            <AlertTitle>{dictation.connection === 'exhausted' ? 'Automatic retries have stopped' : 'Connect to your local backend'}</AlertTitle>
+            <AlertDescription><p>Run <code>uv run outloud</code> in the project folder. Your selected conversation and local drafts are retained.</p><Button variant="outline" size="sm" disabled={dictation.safety === 'stopping'} onClick={() => dictation.reconnect()}><RefreshCw /> Reconnect</Button></AlertDescription>
+          </Alert>}
+          {dictation.safety !== 'none' && <Alert variant={dictation.safety === 'unconfirmed' ? 'destructive' : 'default'}>
+            <AlertTitle>{dictation.safety === 'stopping' ? 'Stopping recording safely…' : dictation.safety === 'unconfirmed' ? 'Recording stop is unconfirmed' : 'Backend confirmed this tab’s recording stopped'}</AlertTitle>
+            <AlertDescription>{dictation.safety === 'unconfirmed' ? 'Check or restart the backend. Reconnect will verify this client has released capture before starting a new session.' : 'Checking this tab’s capture only; other tabs may stay connected.'}</AlertDescription>
+          </Alert>}
+          {(conversations.error || dictation.error || chat.error) && <Alert variant="destructive"><AlertTitle>Backend request failed</AlertTitle><AlertDescription>{chat.error || conversations.error || dictation.error}</AlertDescription></Alert>}
+          {recovered.length > 0 && <details className="recovered-drafts"><summary>Recovered unsaved drafts from unavailable conversations</summary>{recovered.map(([id, item]) => <div key={id}><p>Conversation {id} · copy this text to a new chat to keep working.</p><pre>{item.text}</pre></div>)}</details>}
         </div>
-      </aside>
-
-      <main className="chat-main">
-        <header className="chat-topbar">
-          <div className="mobile-brand"><span className="chat-brand-mark"><AudioLines size={17} /></span><b>OutLoud</b></div>
-          <div className="conversation-title">Local chat <span className="model-label">· Gemma</span></div>
-          <div className="topbar-status" role="status" aria-live="polite"><span className={`status-dot ${recording ? 'is-recording' : connected ? 'is-connected' : ''}`} />{connectionLabel}</div>
-        </header>
-
-        <div className="chat-content">
-          <div className="session-alerts">
-            {!connected && <Alert className="session-alert">
-              <AlertTitle>{connection === 'in-use' ? 'Another tab is using the microphone session' : 'Connect to your local backend'}</AlertTitle>
-              <AlertDescription>
-                <p>{connection === 'in-use' ? 'Close the other tab, then reconnect here.' : <>Run <code className="rounded bg-muted px-1 py-0.5">uv run outloud</code> in the project folder.</>}</p>
-                <Button variant="outline" size="sm" className="mt-2 w-fit" disabled={connection === 'connecting' || safety === 'stopping'} onClick={() => void reconnect()}><RefreshCw /> Reconnect</Button>
-              </AlertDescription>
-            </Alert>}
-            {safety !== 'none' && <Alert variant={safety === 'unconfirmed' ? 'destructive' : 'default'} className="session-alert">
-              <AlertTitle>{safety === 'stopping' ? 'Stopping recording safely…' : safety === 'stopped' ? 'Backend confirmed recording stopped' : 'Recording stop is unconfirmed'}</AlertTitle>
-              <AlertDescription>{safety === 'stopping' ? 'The session is closed. Waiting for the backend to confirm the microphone is idle.' : safety === 'stopped' ? 'Reconnect before recording again. Saved audio remains on disk.' : 'Check or restart the backend. Reconnect will check that recording has stopped before opening another session.'}</AlertDescription>
-            </Alert>}
-          </div>
-
-          <section className="conversation" aria-label="Conversation">
-            {chat.messages.length === 0 ? <div className="empty-conversation">
-              <div className="welcome-mark"><Sparkles size={21} /></div>
-              <h1>What would you like to say?</h1>
-              <p>Speak naturally or type a message. Review your words, then send them to Gemma.</p>
-              <div className="welcome-tip"><AudioLines size={17} /><span><b>Voice-first, always editable</b><small>Hold the mic to dictate. Your transcript lands in the composer before anything is sent.</small></span></div>
-            </div> : <ol className="message-list">
-              {chat.messages.map((message) => <li className={`message-row ${message.role === 'user' ? 'user-message' : 'assistant-message'}`} key={message.id}>
-                <div className={`message-avatar ${message.role === 'assistant' ? 'assistant-avatar' : ''}`}>{message.role === 'user' ? 'Y' : <Sparkles size={16} />}</div>
-                <div className="message-body"><div className="message-author">{message.role === 'user' ? 'You' : 'Gemma'}{message.role === 'assistant' && message.status === 'complete' && <span className="local-answer"><Check size={12} /> Local</span>}</div>
-                  <p className="message-content">{message.content || (message.status === 'streaming' ? <span className="thinking"><LoaderCircle size={14} /> Thinking…</span> : 'No reply received.')}</p>
-                  {message.role === 'assistant' && message.status !== 'complete' && <p className="message-meta">{message.status === 'streaming' ? 'Generating…' : message.status === 'cancelled' ? 'Stopped · partial reply' : 'Failed · partial reply'}</p>}
-                  {message.role === 'assistant' && message.metrics && <p className="message-meta">{message.metrics.elapsed_seconds.toFixed(1)}s{message.metrics.output_tokens !== undefined && ` · ${message.metrics.output_tokens} output tokens`}</p>}
-                  {message.role === 'user' && (message.status === 'failed' || message.status === 'cancelled') && <Button variant="ghost" size="sm" className="mt-1" onClick={() => setComposer((previous) => ({ ...previous, text: [previous.text, message.content].filter(Boolean).join('\n') }))}>Use this text again</Button>}
-                </div>
-              </li>)}
-              <div ref={transcriptEnd} />
-            </ol>}
-          </section>
-
-          <div className="composer-dock">
-            {snapshot && <div className="capacity-note" role="status">{processing && !recording && <LoaderCircle size={13} className="animate-spin motion-reduce:animate-none" />}{snapshot.capacity.used} of {snapshot.capacity.limit} transcription slots used{capacityFull && ' · Capacity full; wait for a job to finish'}{queued > 0 && ` · ${queued} queued`}{controlsPending ? <span>Sending recording controls…</span> : <span>· {status}</span>}</div>}
-            {!snapshot && <div className="capacity-note" role="status">{connection === 'connecting' ? 'Connecting to local services…' : 'Microphone unavailable'}</div>}
-            <div className="message-composer">
-              <label htmlFor="composer" className="sr-only">Your text</label>
-              <Textarea id="composer" value={draft} onChange={(event) => setComposer((previous) => ({ ...previous, text: event.target.value }))} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send() } }} placeholder="Message OutLoud" className="composer-input" />
-              <div className="composer-toolbar"><span className="composer-hint"><AudioLines size={14} /> Transcript stays editable until you send</span><div className="composer-buttons">
-                {chat.busy ? <Button variant="outline" size="sm" onClick={() => void chat.stop()} aria-label="Stop generation">Stop generation</Button> : <Button disabled={!connected || safety !== 'none' || !draft.trim()} onClick={send} aria-label="Send message" className="send-button"><ArrowUp size={17} /><span>Send</span></Button>}
-              </div></div>
+        {selected && <ConversationActions key={`${selected.id}:${selected.title}`} conversation={selected} library={library} enabled={connected} />}
+        {!selected && !conversations.loading && list.length === 0 && connected && <p className="capacity-note">Create a new chat to start. Your conversations will be saved locally.</p>}
+        <section className="conversation" aria-label="Conversation">
+          {!chat.messages.length ? <div className="empty-conversation">
+            <div className="welcome-mark"><Sparkles size={21} /></div>
+            <h1>What would you like to say?</h1>
+            <p>Speak naturally or type a message. Review your words, then send them to Gemma.</p>
+          </div> : <ol className="message-list">
+            {chat.messages.map((message) => <li className={`message-row ${message.role === 'user' ? 'user-message' : 'assistant-message'}`} key={message.id}>
+              <div className={`message-avatar ${message.role === 'assistant' ? 'assistant-avatar' : ''}`}>{message.role === 'user' ? 'Y' : <Sparkles size={16} />}</div>
+              <div className="message-body">
+                <div className="message-author">{message.role === 'user' ? 'You' : 'Gemma'}</div>
+                <p className="message-content">{message.content || (message.status === 'streaming' ? 'Thinking…' : 'No reply received.')}</p>
+                {message.status !== 'complete' && <p className="message-meta">{message.status === 'streaming' ? 'Generating…' : `${message.status} · partial reply`}</p>}
+                {message.metrics && <p className="message-meta">{message.metrics.elapsed_seconds?.toFixed(1)}s{message.metrics.output_tokens !== undefined && ` · ${message.metrics.output_tokens} output tokens`}</p>}
+              </div>
+            </li>)}
+          </ol>}
+        </section>
+        <div className="composer-dock">
+          {draft?.conflict !== null && draft?.conflict !== undefined && <Alert variant="destructive">
+            <AlertTitle>Draft conflict</AlertTitle>
+            <AlertDescription>
+              <p>Your unsaved edits are retained in the composer. Another tab changed the saved draft; review both before saving.</p>
+              <pre className="remote-draft">{draft.conflict || '(Empty saved draft)'}</pre>
+              <Button variant="outline" onClick={() => { if (selectedId) library.resolve(selectedId, [draft.text, draft.conflict].filter(Boolean).join('\n')) }}>Keep both drafts</Button>
+              <Button variant="outline" onClick={() => { if (selectedId) library.resolve(selectedId, draft.text) }}>Save my reviewed draft</Button>
+              <Button variant="ghost" onClick={() => { if (selectedId) library.resolve(selectedId, draft.conflict ?? '') }}>Use saved draft</Button>
+            </AlertDescription>
+          </Alert>}
+          {draft?.error && <Alert><AlertTitle>Draft not saved</AlertTitle><AlertDescription>{draft.error}<Button variant="outline" onClick={() => { if (selectedId) void library.save(selectedId) }}>Retry saving draft</Button></AlertDescription></Alert>}
+          <div className="message-composer">
+            <label htmlFor="composer" className="sr-only">Your text</label>
+            <Textarea id="composer" disabled={!draft} value={draft?.text ?? ''} onChange={(event) => { if (selectedId) library.edit(selectedId, event.target.value) }} onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); if (canSend) void send() }
+            }} placeholder="Message OutLoud" className="composer-input" />
+            <div className="composer-toolbar">
+              <span className="composer-hint"><AudioLines size={14} />{draft && draft.text !== draft.base ? 'Unsaved changes kept in this tab' : 'Your draft is saved locally'}</span>
+              {chat.ownedBusy ? <Button variant="outline" onClick={chat.stop}>Stop generation</Button> : <Button disabled={!canSend} onClick={() => void send()} aria-label="Send message" className="send-button"><ArrowUp size={17} /> Send</Button>}
             </div>
-            <div className="recording-row"><RecordingControl enabled={canStart} recording={recording} handsFree={snapshot?.hands_free ?? false} pending={controlsPending} canStop={canStop} press={press} release={release} stop={stop} startHandsFree={handsFree} /></div>
-            <footer className="privacy-footer"><span><Check size={12} /> Audio and transcripts stay on this Mac</span><span>Whisper transcription · Gemma chat runs locally</span></footer>
           </div>
+          {chat.busy && !chat.ownedBusy && <p role="status" className="capacity-note">This conversation is generating in another tab. Wait for its reply before sending.</p>}
+          <div className="recording-row"><RecordingControl enabled={micEnabled} recording={recording} occupied={occupied} pending={dictation.pending} toggle={() => {
+            if (recording || selectedId) void dictation.command(recording ? 'stop' : 'start', selectedId ?? dictation.snapshot?.conversation_id ?? '')
+          }} /></div>
+          {recording && dictation.snapshot?.conversation_id !== selectedId && <p role="status" className="capacity-note">Recording stays bound to its original conversation; switching does not move dictated text.</p>}
+          {dictation.snapshot?.capacity.available === 0 && <p role="status" className="capacity-note">Transcription capacity full · wait for a job to finish.</p>}
+          <footer className="privacy-footer"><span><Check size={12} /> Audio and conversations stay on this Mac</span><span>Whisper transcription · Gemma chat runs locally</span></footer>
         </div>
-      </main>
-    </div>
-    </>
-  )
+      </div>
+    </main>
+  </div>
 }
