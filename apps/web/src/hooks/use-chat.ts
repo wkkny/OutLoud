@@ -66,6 +66,16 @@ export function useChat(sessionId: string | null) {
     return () => { mounted.current = false; void stop() }
   }, [stop])
 
+  const dismissError = useCallback(() => setError(null), [])
+
+  const clear = useCallback(() => {
+    if (run.current) return false
+    history.current = []
+    setMessages([])
+    setError(null)
+    return true
+  }, [])
+
   const send = async (draft: string, onAccepted: () => void) => {
     const content = draft.trim()
     if (!sessionId || run.current || !content) return
@@ -159,5 +169,5 @@ export function useChat(sessionId: string | null) {
     }
   }
 
-  return { messages, busy, error, send, stop, dismissError: () => setError(null) }
+  return { messages, busy, error, send, stop, clear, dismissError }
 }

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { toast } from 'sonner'
 import App from './App'
 import { initialState } from '@/test/backend-fixture'
 
@@ -37,14 +38,20 @@ const defaultFetch: typeof fetch = async (_url, init) => init?.method === 'POST'
   : Response.json({ ...initialState, ui_connected: false })
 const fetchMock = vi.fn<typeof fetch>(defaultFetch)
 
-beforeEach(() => {
+beforeEach(async () => {
+  toast.dismiss()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   FakeSocket.instances = []
   fetchMock.mockReset().mockImplementation(defaultFetch)
   vi.stubGlobal('WebSocket', FakeSocket)
   vi.stubGlobal('fetch', fetchMock)
 })
 
-afterEach(() => vi.useRealTimers())
+afterEach(async () => {
+  vi.useRealTimers()
+  act(() => toast.dismiss())
+  await new Promise((resolve) => setTimeout(resolve, 0))
+})
 
 describe('voice-first UI', () => {
   it('sends reviewed text to Gemma, renders the reply and clears only the sent draft', async () => {
@@ -311,18 +318,18 @@ describe('voice-first UI', () => {
     expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
   })
 
-  it('shows initial recording and transcription failures without treating history as current unavailability', () => {
+  it('shows initial recording and transcription failures without treating history as current unavailability', async () => {
     const { container } = render(<App />)
     const errors = {
       recording: { recording_id: null, conversation_id: 'local-draft', message: 'Earlier recording failed.', occurred_at: '2026-04-15T12:30:00.123456+00:00' },
       transcription: { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00+00:00' },
     }
     act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors } }))
-    expect(screen.getByText('Previous recording error')).toBeInTheDocument()
-    expect(screen.getByText('Previous transcription error')).toBeInTheDocument()
+    await screen.findByText('Previous recording error')
+    await screen.findByText('Previous transcription error')
     expect(screen.getByText('Earlier recording failed.')).toBeInTheDocument()
     expect(screen.getByText('recording-previous')).toBeInTheDocument()
-    expect(container.querySelector('time')?.getAttribute('datetime')).toBe(errors.recording.occurred_at)
+    expect([...container.querySelectorAll('time')].map((time) => time.getAttribute('datetime'))).toContain(errors.recording.occurred_at)
     expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
     expect(screen.queryByText('Recording backend is unavailable')).not.toBeInTheDocument()
   })
@@ -334,24 +341,24 @@ describe('voice-first UI', () => {
       transcription: { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00Z' },
     }
     act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors } }))
-    await userEvent.click(screen.getByRole('button', { name: 'Dismiss previous transcription error' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Dismiss' }))
     act(() => socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, errors } }))
-    expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument())
     act(() => socket().close())
     await screen.findByText('Backend confirmed recording stopped')
     await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
     act(() => socket().emit({ type: 'session.ready', session_id: 'new-session', state: { ...initialState, errors } }))
-    expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('Previous transcription error')).not.toBeInTheDocument())
     act(() => socket().emit({ type: 'transcription.error', message: 'Earlier transcription failed.' }))
-    expect(screen.getByText('Something went wrong')).toBeInTheDocument()
-    expect(screen.getByText('Earlier transcription failed.')).toBeInTheDocument()
+    expect(await screen.findByText('Something went wrong')).toBeInTheDocument()
+    expect(await screen.findByText('Earlier transcription failed.')).toBeInTheDocument()
   })
 
   it('shows a different failure on reconnect even after an older failure was dismissed', async () => {
     render(<App />)
     const failure = { recording_id: 'recording-previous', conversation_id: 'local-draft', message: 'Earlier transcription failed.', occurred_at: '2026-04-15T12:31:00Z' }
     act(() => socket().emit({ type: 'session.ready', session_id: 'session', state: { ...initialState, errors: { recording: null, transcription: failure } } }))
-    await userEvent.click(screen.getByRole('button', { name: 'Dismiss previous transcription error' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Dismiss' }))
     act(() => socket().close())
     await screen.findByText('Backend confirmed recording stopped')
     await userEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
@@ -359,8 +366,8 @@ describe('voice-first UI', () => {
       type: 'session.ready', session_id: 'new-session',
       state: { ...initialState, errors: { recording: null, transcription: { ...failure, recording_id: 'recording-new', occurred_at: '2026-04-15T12:32:00Z' } } },
     }))
-    expect(screen.getByText('Previous transcription error')).toBeInTheDocument()
-    expect(screen.getByText('recording-new')).toBeInTheDocument()
+    await screen.findByText('Previous transcription error')
+    expect(await screen.findByText('recording-new')).toBeInTheDocument()
   })
 
   it('appends a transcript without replacing typed text or inserting duplicates', async () => {
@@ -512,7 +519,7 @@ describe('voice-first UI', () => {
       'http://127.0.0.1:8765/recording/release',
     ])
     expect(screen.getByRole('button', { name: 'Hold to record' })).toBeDisabled()
-    expect(screen.getByText('Network request failed')).toBeInTheDocument()
+    expect(await screen.findByText('Network request failed')).toBeInTheDocument()
   })
 
   it.each([403, 503, 500, 'timeout'] as const)('closes the owner session on %s command failure', async (failure) => {
@@ -561,7 +568,7 @@ describe('voice-first UI', () => {
     expect(posts[1]?.[1]?.headers).toMatchObject({ 'X-Session-ID': 'new-session' })
   })
 
-  it('ignores older snapshots and shows backend errors', () => {
+  it('ignores older snapshots and shows backend errors', async () => {
     render(<App />)
     connect()
     act(() => {
@@ -570,7 +577,7 @@ describe('voice-first UI', () => {
     })
     expect(screen.getByRole('button', { name: 'Release to stop' })).toBeInTheDocument()
     act(() => socket().emit({ type: 'recording.error', message: 'Microphone permission denied.' }))
-    expect(screen.getByText('Microphone permission denied.')).toBeInTheDocument()
+    expect(await screen.findByText('Microphone permission denied.')).toBeInTheDocument()
   })
 
   it('keeps Fn off by default and enables it only through the owner endpoint', async () => {
@@ -602,7 +609,7 @@ describe('voice-first UI', () => {
     expect(toggle).not.toBeChecked()
   })
 
-  it('shows Fn permission errors without disabling on-screen recording or losing text', () => {
+  it('shows Fn permission errors without disabling on-screen recording or losing text', async () => {
     render(<App />)
     connect()
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my draft' } })
@@ -610,7 +617,7 @@ describe('voice-first UI', () => {
       type: 'state.updated',
       state: { ...initialState, revision: 2, fn_shortcut: { status: 'failed', error: 'Allow Accessibility for your terminal, then restart the backend.' } },
     }))
-    expect(screen.getByRole('alert')).toHaveTextContent('Allow Accessibility')
+    expect(await screen.findByText('Allow Accessibility for your terminal, then restart the backend.')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'Enable Fn shortcut' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
