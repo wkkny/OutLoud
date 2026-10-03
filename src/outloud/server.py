@@ -87,6 +87,9 @@ class ClientConnection:
         self.in_flight = set()
         self.send_lock = asyncio.Lock()
         self.ready_sent = asyncio.Event()
+        self.transcripts_ready = asyncio.Event()
+        self.transcripts_ready.set()
+        self.pending_conversations = set()
 
     def alive(self):
         return self.active and self.clock() - self.last_heartbeat < self.lease_seconds
@@ -101,8 +104,17 @@ class ClientConnection:
         if completed:
             if self.conversation_id is not None and event["conversation_id"] != self.conversation_id:
                 return
+            # The inbox already owns this result. Wake its bounded sender rather
+            # than queueing a second copy while initial replay is still running.
+            self.transcripts_ready.set()
+            return
         elif event["type"] != "recording.state" and event.get("session_id") not in (None, self.session_id):
             return
+        if event["type"] == "conversation.updated":
+            conversation_id = event["conversation_id"]
+            if conversation_id in self.pending_conversations:
+                return
+            self.pending_conversations.add(conversation_id)
         public_event = {key: value for key, value in event.items() if key != "session_id"}
         target = self.controls if event["type"] in ("session.pong", "pong", "transcript.acknowledged") else self.events
         try:
@@ -154,23 +166,31 @@ class ClientConnection:
             "state": state_snapshot(self.session_id),
         })
         self.ready_sent.set()
-        # Stream replay directly: a backlog larger than the event queue must not
-        # overflow it before the client can acknowledge anything.
-        replay = self.inbox.replay(self.conversation_id)
-        while self.active:
-            batch = await asyncio.to_thread(lambda: list(itertools.islice(replay, 16)))
-            if not batch:
-                break
-            for event in batch:
-                if not self.active:
-                    return
-                await self.send(event)
         while True:
             event = await self.events.get()
+            if event["type"] == "conversation.updated":
+                self.pending_conversations.discard(event["conversation_id"])
             await self.send(event)
             if event["type"] == "connection.error":
                 await self.websocket.close(code=1013)
                 return
+
+    async def send_transcripts(self):
+        await self.ready_sent.wait()
+        while self.active:
+            await self.transcripts_ready.wait()
+            self.transcripts_ready.clear()
+            # Every scan has a finite high-water mark. Completions arriving during
+            # it set the wakeup again, so later results get their own scan.
+            replay = self.inbox.replay(self.conversation_id)
+            while self.active:
+                batch = await asyncio.to_thread(lambda: list(itertools.islice(replay, 16)))
+                if not batch:
+                    break
+                for event in batch:
+                    if not self.active:
+                        return
+                    await self.send(event)
 
     async def watch_lease(self):
         while True:
@@ -541,6 +561,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
             tasks = [
                 asyncio.create_task(connection.send_events(state_snapshot)),
                 asyncio.create_task(connection.send_controls()),
+                asyncio.create_task(connection.send_transcripts()),
                 asyncio.create_task(connection.receive_messages()),
                 asyncio.create_task(connection.process_acknowledgements()),
                 asyncio.create_task(connection.watch_lease()),

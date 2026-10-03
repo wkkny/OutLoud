@@ -150,6 +150,54 @@ class ReconnectTests(unittest.TestCase):
             self.assertEqual(seen, [str(index) for index in range(180)])
             self.assertTrue(self.client.get("/state").json()["ui_connected"])
 
+    def test_delayed_live_completions_do_not_overflow_a_connecting_clients_replay(self):
+        store = self.client.app.state.conversations
+        release = threading.Event()
+        original_apply = store.apply_transcript
+        original_send = WebSocket.send_json
+
+        def delayed_apply(*args):
+            if not release.wait(5):
+                raise AssertionError("Transcript persistence was not released")
+            return original_apply(*args)
+
+        async def release_after_ready(websocket, event, mode="text"):
+            await original_send(websocket, event, mode)
+            if event["type"] == "session.ready":
+                release.set()
+
+        try:
+            with patch.object(store, "apply_transcript", delayed_apply), patch.object(WebSocket, "send_json", release_after_ready):
+                # The inbox is durable before connection, but live notifications
+                # complete only after ready, overlapping its initial replay.
+                for index in range(180):
+                    self.runtime.publish(result(str(index), "chat"))
+                with self.connect() as socket:
+                    self.headers(socket)
+                    seen = []
+                    while len(seen) < 180:
+                        event = socket.receive_json()
+                        self.assertNotEqual(event["type"], "connection.error")
+                        if event["type"] == "transcription.completed":
+                            seen.append(event["recording_id"])
+                            socket.send_json({"type": "transcript.ack", "recording_id": event["recording_id"], "conversation_id": "chat"})
+                            if len(seen) == 1:
+                                # This result lands after replay's high-water mark.
+                                self.runtime.publish(result("later", "chat"))
+                    self.assertEqual(seen, [str(index) for index in range(180)])
+                    later = receive_type(socket, "transcription.completed", max_events=200)
+                    self.assertEqual(later["recording_id"], "later")
+                    socket.send_json({"type": "transcript.ack", "recording_id": "later", "conversation_id": "chat"})
+                    socket.send_json({"type": "session.ping", "id": 99})
+                    while True:
+                        event = socket.receive_json()
+                        self.assertNotEqual(event["type"], "transcription.completed", "A replayed result must not be delivered twice")
+                        if event["type"] == "session.pong":
+                            break
+                    self.assertTrue(self.client.get("/state").json()["ui_connected"])
+        finally:
+            release.set()
+
     def test_simultaneous_upgrades_admit_independent_clients(self):
         accepted = []
         release_accept = threading.Event()

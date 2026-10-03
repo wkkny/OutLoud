@@ -90,7 +90,10 @@ Acknowledgement messages are `transcript.ack` with `recording_id` and
 removed, while the durable draft remains. Acknowledgements release delivery credits
 for every subscriber, so multiple tabs do not exhaust their windows on the same
 result. Unknown acknowledgements never tombstone a future completion.
-Replay reads bounded batches of 16 and uses an independent heartbeat/control path.
+Live delivery and replay use the same inbox sender, reading bounded batches of 16
+with at most 16 unacknowledged results per client. Live completions wake the sender
+instead of queueing duplicate payloads during replay. Repeated updates for the same
+conversation are coalesced while queued. Heartbeat/control delivery is independent.
 
 Deleting a conversation purges pending inbox text and retains an ID-only tombstone
 so later transcription completion cannot restore deleted text. Saved audio files
