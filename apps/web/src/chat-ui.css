@@ -51,6 +51,7 @@
 .recovered-drafts summary { cursor: pointer; }
 .capacity-note { margin: 8px 0; font-size: 11px; color: #77777d; }
 .message-composer { border: 1px solid #dedee2; border-radius: 16px; padding: 10px 11px 8px; box-shadow: 0 4px 18px #00000008; }
+.message-composer:has(.composer-input:focus) { border-color: var(--ring); box-shadow: none; }
 .composer-input { width: 100%; min-height: 44px; max-height: 180px; resize: vertical; border: 0 !important; box-shadow: none !important; padding: 3px 4px !important; font-size: 13px !important; line-height: 1.55 !important; }
 .composer-input::placeholder { color: #77777d; }
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }
