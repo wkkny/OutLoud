@@ -1,0 +1,3 @@
+# Multi-client conversations share one recorder
+
+OutLoud persists conversations and drafts in the local backend so browser tabs share a conversation library, while each tab can independently resume a selected conversation. Browser clients are independent of the single physical microphone recorder: only one recording may run at a time, and its transcript is bound to the conversation that started it. Gemma generations are independent per conversation but globally bounded (default two). Browser-owned Fn controls are removed; an Electron-owned shortcut is a separate future integration. This separates durable chat identity from exclusive machine-wide capture while keeping local model and microphone resource use bounded.
