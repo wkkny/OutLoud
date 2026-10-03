@@ -37,6 +37,15 @@ class FnShortcut:
             return
         self.session_id = session_id
         self.conversation_id = conversation_id
+        availability_error = getattr(self.listener_factory, "availability_error", None)
+        error = availability_error() if availability_error is not None else None
+        if error is not None:
+            self.state = {
+                "status": "failed",
+                "error": error,
+            }
+            self.runtime.state_changed()
+            return
         if self.state["status"] in ("starting", "enabled"):
             return
         self.generation += 1
