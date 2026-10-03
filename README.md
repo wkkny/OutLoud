@@ -1,8 +1,8 @@
 # OutLoud
 
 A local, voice-first chat app for macOS. Python records the microphone and
-transcribes with Whisper; a React interface appends the transcript to an editable
-composer. Transcripts never auto-send. Review your text, then send it to local
+transcribes with Whisper; the backend saves the transcript to the conversation's
+editable draft. Transcripts never auto-send. Review your text, then send it to local
 Gemma `gemma3:4b` through Ollama for a streamed reply.
 
 ## Prerequisites
@@ -40,58 +40,50 @@ microphone. Allow microphone access for the terminal or application launching th
 backend when macOS asks. Whisper downloads the `base` model on the first
 transcription; later transcriptions use the cached local model.
 
-Hold the recording button and release to stop, or choose **Record hands-free**
-and then **Stop**. Transcripts append without replacing typed text. Only one
-browser tab can own the recording session.
+Create a conversation with **New chat**, or select a saved one in the sidebar.
+Click **Start recording** once to begin and **Stop recording** once to finish.
+Recording stays bound to the conversation selected when it started, even if you
+switch chats. Other tabs can connect and chat, but cannot take over the microphone.
+Closing the initiating tab safely stops its recording.
 
-## Fn/Globe shortcut
+Conversations, titles, messages, and drafts are stored locally in SQLite. Each tab
+remembers its selection after reload. Rename or delete a chat using its controls.
+Draft edits are saved automatically. If tabs make conflicting edits, the composer
+keeps your unsaved text and asks you to review both drafts instead of overwriting
+someone else's work.
 
-In the UI, check **Enable Fn shortcut**. Capture is off by default and only works
-while this tab owns a connected backend session:
-
-- Hold Fn/Globe to record; release to stop.
-- Double-tap for one uninterrupted hands-free recording; tap again to stop.
-- The on-screen controls show the same recording state and can stop Fn recordings.
-
-While enabled, capture works across apps, even with the browser in the background.
-OutLoud suppresses the captured Fn key's default action without changing macOS
-keyboard preferences. Turning the toggle off or disconnecting the owner tab stops
-recording and releases capture. Reconnects require opting in again.
-
-Keyboard capture needs macOS **Accessibility** permission for the terminal or app
-launching the backend, and **Input Monitoring** if macOS requests it. Set these in
-**System Settings → Privacy & Security**. Restart the backend (and quit/reopen the
-terminal if macOS asks), reconnect, then enable the toggle again. Permission errors
-appear next to the toggle; on-screen recording still works without keyboard access.
-If macOS disables the event tap, OutLoud stops recording and asks you to re-enable
-capture rather than silently resuming it.
+Browser Fn/Globe capture, hold-to-record, and double-tap controls are removed.
+Electron-owned shortcuts are a separate future integration; no Electron app is
+included in this implementation.
 
 ## Connection recovery
 
-Completed transcripts are retained until the composer acknowledges them. After
-**Reconnect**, missed results replay into their original conversation. Repeated
-results are acknowledged without inserting the text again, even if you edited it.
-Fn remains off after reconnect; enable it again when ready.
+Completed transcripts are appended to their originating saved draft before browser
+delivery. A durable recording marker prevents duplicate appends during replay,
+even if you edited or cleared the draft. Results remain available until acknowledged.
+Initial connection failures and dropped sessions use bounded retry/backoff. After
+retries are exhausted, the UI offers **Reconnect**. Your selection and unsaved
+recovery text remain in this tab while the backend is unavailable.
 
 The UI sends application heartbeats every 15 seconds and expects a matching reply
 within 10 seconds. A missing reply closes the session and starts safe-stop checks.
-The backend expires ownership after 90 seconds without a heartbeat, releasing Fn
-capture and queuing a stop even if the browser's WebSocket stays open. The longer
+The backend expires a client's lease after 90 seconds without a heartbeat and
+queues a stop if that client owns capture, even if its WebSocket stays open. The longer
 lease tolerates common background-tab timer throttling; a longer browser/OS
 suspension can still require manual reconnect.
 
 Delivery results and acknowledgement markers are stored in
 `recordings/delivery.sqlite3`. Unacknowledged results survive backend restart and
-replay in small batches. This is not durable draft storage: reloading the page
-clears the composer, and already-acknowledged text is not restored.
+replay in small batches. Conversations and drafts are stored separately in
+`recordings/conversations.sqlite3`; set `OUTLOUD_CONVERSATIONS_DB` to override that
+path. Saved drafts and chat history survive page reloads and backend restarts.
 
 ## Transcription capacity
 
 OutLoud allows **3 outstanding transcriptions** by default, counting the active
 job, queued jobs, and the current recording. A slot is reserved before microphone
 startup. When capacity is full, new recordings are refused without closing the
-owner session; Stop/release and stopping hands-free with Fn still work. The UI
-shows slot usage. Slots reopen after transcription succeeds or fails, or after an
+client session; **Stop recording** still works. The UI reports when capacity is full. Slots reopen after transcription succeeds or fails, or after an
 empty/failed recording releases its reservation.
 
 Configure a positive limit when launching the backend or the combined dev task:
@@ -116,8 +108,12 @@ ollama pull gemma3:4b           # another terminal
 
 Press **Send** after reviewing the composer. **Stop generation** preserves partial
 text and does not stop recording. Chat uses a 4,096-token context and up to 1,024
-output tokens. Missing Ollama/model errors leave dictation available. Conversations
-are page-memory only. See [chat setup, behavior, and measurements](CHAT.md).
+output tokens. Missing Ollama/model errors leave dictation available. One reply can
+run per conversation, with two across the app by default. At capacity, Send reports
+busy and keeps the draft; requests are not queued or retried automatically. Configure
+`OUTLOUD_MAX_CHAT_GENERATIONS` before startup, for example
+`OUTLOUD_MAX_CHAT_GENERATIONS=1 bun run dev` on a memory-constrained Mac.
+See [chat setup, behavior, and measurements](CHAT.md).
 
 ## Commands
 
@@ -221,9 +217,10 @@ Audio is retained when transcription fails. Recordings, dependencies, generated
 web output, and Turbo caches are excluded from Git. Whisper's model cache lives
 outside the repository.
 
-Chat messages, drafts, and transcript deduplication are held in page memory. Transcription capacity is bounded; delivery results and
-acknowledgement markers use disk storage with bounded replay batches, not an
-in-memory backlog. Disk usage is not capped or automatically pruned. Queued audio
+Chat messages, drafts, and transcript deduplication markers are stored locally in
+SQLite. Deleting a conversation removes its saved chat, draft, and pending delivery
+text; saved audio files remain under `recordings/`. Transcription capacity is bounded,
+and delivery uses bounded replay batches rather than an in-memory backlog. Disk usage is not capped or automatically pruned. Queued audio
 jobs are not automatically resumed after backend restart, although their files
 remain saved. Backend shutdown drains saved transcription jobs and can wait for
 Whisper; it has no deadline. Do not expose the loopback backend to a network.

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
-import { CONVERSATION_ID } from '@/hooks/use-dictation'
+import { HTTP_URL } from '@/lib/backend-url'
+import type { ConversationDetail, ConversationLibrary, SavedMessage } from '@/lib/conversations'
 
-const HTTP_URL = 'http://127.0.0.1:8765'
 const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat.started'), request_id: z.string() }),
   z.object({ type: z.literal('chat.delta'), request_id: z.string(), text: z.string().min(1) }),
@@ -11,99 +11,86 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat.cancelled'), request_id: z.string() }),
 ])
 
-type Status = 'streaming' | 'complete' | 'cancelled' | 'failed'
-export type ChatMessage = {
-  id: string
-  requestId: string
-  role: 'user' | 'assistant'
-  content: string
-  status: Status
-  metrics?: Record<string, number>
-}
-type Run = {
-  id: string
-  sessionId: string
-  controller: AbortController
-  reader?: ReadableStreamDefaultReader<Uint8Array>
-  stopped: boolean
-}
+type Status = SavedMessage['status']
+type Run = { id: string; conversationId: string; sessionId: string; controller: AbortController; reader?: ReadableStreamDefaultReader<Uint8Array>; stopped: boolean }
 
-export function useChat(sessionId: string | null) {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const history = useRef<ChatMessage[]>([])
-  const run = useRef<Run | null>(null)
+/** Live runs are keyed by conversation, not selection. Reloads cannot replace a live stream. */
+export function useChat(sessionId: string | null, selectedId: string | null, details: Record<string, ConversationDetail>, historyRevisions: Record<string, number>, library: ConversationLibrary) {
+  const [live, setLive] = useState<Record<string, SavedMessage[]>>({})
+  const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const history = useRef<Record<string, SavedMessage[]>>({})
+  const runs = useRef(new Map<string, Run>())
   const mounted = useRef(true)
+  const latestDetails = useRef(details)
+  const observedHistory = useRef(historyRevisions)
+  useEffect(() => { latestDetails.current = details }, [details])
 
-  const update = useCallback((transform: (previous: ChatMessage[]) => ChatMessage[]) => {
-    history.current = transform(history.current)
-    if (mounted.current) setMessages(history.current)
+  const update = useCallback((id: string, transform: (previous: SavedMessage[]) => SavedMessage[]) => {
+    history.current = { ...history.current, [id]: transform(history.current[id] ?? latestDetails.current[id]?.messages ?? []) }
+    if (mounted.current) setLive(history.current)
   }, [])
-
-  const stop = useCallback(async () => {
-    const active = run.current
-    if (!active || active.stopped) return
-    active.stopped = true
-    active.controller.abort()
+  const stopRun = useCallback(async (active: Run) => {
+    if (active.stopped) return
+    active.stopped = true; active.controller.abort()
     void active.reader?.cancel().catch(() => undefined)
-    // Aborting the HTTP stream cancels upstream too. The explicit request covers
-    // a transport that has not yet noticed the disconnect; stale IDs are harmless.
     try {
       await fetch(`${HTTP_URL}/chat/cancel`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': active.sessionId },
         body: JSON.stringify({ request_id: active.id }), signal: AbortSignal.timeout(3000),
       })
-    } catch { /* HTTP abort remains the fallback. */ }
+    } catch { /* Stream abort also cancels upstream. */ }
   }, [])
-
   useEffect(() => {
-    if (run.current && run.current.sessionId !== sessionId) void stop()
-  }, [sessionId, stop])
-
+    for (const active of runs.current.values()) if (active.sessionId !== sessionId) void stopRun(active)
+  }, [sessionId, stopRun])
   useEffect(() => {
     mounted.current = true
-    return () => { mounted.current = false; void stop() }
-  }, [stop])
-
-  const dismissError = useCallback(() => setError(null), [])
-
-  const clear = useCallback(() => {
-    if (run.current) return false
-    history.current = []
-    setMessages([])
-    setError(null)
-    return true
-  }, [])
-
-  const send = async (draft: string, onAccepted: () => void) => {
-    const content = draft.trim()
-    if (!sessionId || run.current || !content) return
-    if (content.length > 12000) {
-      setError('This message is too long. Shorten it to 12,000 characters or fewer.')
-      return
+    const activeRuns = runs.current
+    return () => { mounted.current = false; for (const active of activeRuns.values()) void stopRun(active) }
+  }, [stopRun])
+  useEffect(() => {
+    // Only a fresh GET of this conversation can retire its orphaned overlay.
+    // Unrelated loads and delayed draft-save responses cannot recover history.
+    let changed = false
+    const next: Record<string, SavedMessage[]> = {}
+    for (const [id, messages] of Object.entries(history.current)) {
+      if ((historyRevisions[id] ?? 0) > (observedHistory.current[id] ?? 0) && !runs.current.has(id)) changed = true
+      else next[id] = messages
     }
-    const active: Run = { id: crypto.randomUUID(), sessionId, controller: new AbortController(), stopped: false }
-    run.current = active
-    setBusy(true)
-    setError(null)
+    observedHistory.current = historyRevisions
+    if (changed) { history.current = next; if (mounted.current) setLive(next) }
+  }, [historyRevisions])
+
+  const send = async (id: string, draft: string, onAccepted: () => void) => {
+    const content = draft.trim()
+    if (!sessionId || runs.current.has(id) || !content) return
+    const setError = (message: string) => { if (mounted.current) setErrors((previous) => ({ ...previous, [id]: message })) }
+    if (content.length > 12000) { setError('This message is too long. Shorten it to 12,000 characters or fewer.'); return }
+    const active: Run = { id: crypto.randomUUID(), conversationId: id, sessionId, controller: new AbortController(), stopped: false }
+    runs.current.set(id, active)
+    setBusyIds(new Set(runs.current.keys()))
+    setErrors((previous) => { const next = { ...previous }; delete next[id]; return next })
     let accepted = false
     let terminal = false
-    const mark = (status: Status, metrics?: Record<string, number>) => update((previous) => previous.map((message) =>
-      message.requestId === active.id ? { ...message, status, ...(message.role === 'assistant' && metrics ? { metrics } : {}) } : message))
+    const mark = (status: Status, metrics?: Record<string, number>) => update(id, (previous) => previous.map((message) =>
+      message.id.startsWith(active.id) ? { ...message, status, ...(message.role === 'assistant' && metrics ? { metrics } : {}) } : message))
     try {
-      const context = history.current.filter((message) => message.status === 'complete').slice(-64)
-        .map(({ role, content: text }) => ({ role, content: text }))
       const response = await fetch(`${HTTP_URL}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
-        body: JSON.stringify({ request_id: active.id, conversation_id: CONVERSATION_ID, messages: [...context, { role: 'user', content }] }),
+        body: JSON.stringify({ request_id: active.id, conversation_id: id, messages: [{ role: 'user', content }] }),
         signal: AbortSignal.any([active.controller.signal, AbortSignal.timeout(190000)]),
       })
       if (!response.ok) {
-        if (response.status === 409) throw new Error('Gemma is already generating. Stop it or wait, then try again.')
-        if (response.status === 403) throw new Error('The chat session expired. Reconnect before sending again.')
-        if (response.status === 422) throw new Error('The message or conversation is too large. Shorten your text and try again.')
-        throw new Error(`Chat request failed (${response.status}).`)
+        const refusals: Record<number, string> = {
+          409: 'This conversation is already generating. Wait, then try again.',
+          429: 'Generation capacity is busy. Wait for another conversation to finish, then try again.',
+          403: 'The chat session expired. Reconnect before sending again.',
+          404: 'This conversation was deleted. Your unsent text is retained locally.',
+          503: 'Conversation storage is busy. Your draft is retained; try again later.',
+          422: 'The message or conversation is too large. Shorten your text and try again.',
+        }
+        throw new Error(refusals[response.status] ?? `Chat request failed (${response.status}).`)
       }
       if (!response.body) throw new Error('The backend returned no chat stream.')
       const reader = response.body.getReader()
@@ -118,26 +105,22 @@ export function useChat(sessionId: string | null) {
         if (event.type === 'chat.started') {
           if (accepted) throw new Error('The backend restarted a chat response unexpectedly.')
           accepted = true
-          update((previous) => [...previous,
-            { id: `${active.id}-user`, requestId: active.id, role: 'user', content, status: 'streaming' },
-            { id: `${active.id}-assistant`, requestId: active.id, role: 'assistant', content: '', status: 'streaming' },
+          // The history captured before acceptance is authoritative. Ignore WS reloads
+          // racing chat.started (which already contain the newly accepted messages).
+          update(id, () => [...(details[id]?.messages ?? []),
+            { id: `${active.id}-user`, role: 'user', content, status: 'complete', metrics: null, created_at: new Date().toISOString() },
+            { id: `${active.id}-assistant`, role: 'assistant', content: '', status: 'streaming', metrics: null, created_at: new Date().toISOString() },
           ])
           onAccepted()
         } else if (event.type === 'chat.delta') {
           if (!accepted) throw new Error('The backend sent text before accepting the message.')
-          update((previous) => previous.map((message) => message.id === `${active.id}-assistant`
-            ? { ...message, content: message.content + event.text } : message))
+          update(id, (previous) => previous.map((message) => message.id === `${active.id}-assistant` ? { ...message, content: message.content + event.text } : message))
         } else if (event.type === 'chat.done') {
           if (!accepted) throw new Error('The backend completed a message it never accepted.')
-          terminal = true
-          mark('complete', event.metrics)
+          terminal = true; mark('complete', event.metrics)
         } else if (event.type === 'chat.cancelled') {
-          terminal = true
-          active.stopped = true
-          mark('cancelled')
-        } else {
-          throw new Error(event.message)
-        }
+          terminal = true; active.stopped = true; mark('cancelled')
+        } else throw new Error(event.message)
       }
       while (!active.stopped && !terminal) {
         const { value, done } = await reader.read()
@@ -146,28 +129,32 @@ export function useChat(sessionId: string | null) {
         if (buffer.length > 262144) throw new Error('The backend returned an oversized chat event.')
         let newline: number
         while ((newline = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, newline)
-          buffer = buffer.slice(newline + 1)
-          consume(line)
+          const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); consume(line)
         }
-        if (done) {
-          if (buffer.trim()) consume(buffer)
-          break
-        }
+        if (done) { if (buffer.trim()) consume(buffer); break }
       }
       if (!terminal && !active.stopped) throw new Error('The response was interrupted. Any partial reply has been kept.')
-      if (active.stopped) mark('cancelled')
+      if (active.stopped && accepted) mark('cancelled')
     } catch (failure) {
-      mark(active.stopped ? 'cancelled' : 'failed')
-      if (!active.stopped && mounted.current) setError(failure instanceof Error ? failure.message : 'Chat failed. Try again.')
+      if (accepted) mark(active.stopped ? 'cancelled' : 'failed')
+      if (!active.stopped) setError(failure instanceof Error ? failure.message : 'Chat failed. Try again.')
     } finally {
       await active.reader?.cancel().catch(() => undefined)
-      if (run.current === active) {
-        run.current = null
-        if (mounted.current) setBusy(false)
+      // Keep the overlay until a post-stream authoritative reload completes.
+      const beforeReload = library.getSnapshot().historyRevisions[id] ?? 0
+      if (accepted) await library.load(id)
+      if (accepted && (library.getSnapshot().historyRevisions[id] ?? 0) > beforeReload) {
+        const next = { ...history.current }; delete next[id]; history.current = next
+        if (mounted.current) setLive(next)
       }
+      runs.current.delete(id)
+      if (mounted.current) setBusyIds(new Set(runs.current.keys()))
     }
   }
-
-  return { messages, busy, error, send, stop, clear, dismissError }
+  const messages = selectedId ? live[selectedId] ?? details[selectedId]?.messages ?? [] : []
+  const ownedBusy = selectedId ? busyIds.has(selectedId) : false
+  const busy = ownedBusy || messages.some((message) => message.status === 'streaming')
+  return { messages, busy, ownedBusy, error: selectedId ? errors[selectedId] : null, send,
+    stop: () => { const active = selectedId ? runs.current.get(selectedId) : undefined; if (active) void stopRun(active) },
+  }
 }

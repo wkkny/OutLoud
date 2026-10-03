@@ -88,7 +88,6 @@ class ReconnectTests(unittest.TestCase):
         self.wait_state(lambda state: not state["ui_connected"] and state["pending_commands"] == 0)
         with self.connect() as socket:
             self.headers(socket)
-            receive_type(socket, "state.updated")  # Drain the claim publication.
             self.runtime.publish(completed)
             while True:
                 event = socket.receive_json()
@@ -151,7 +150,55 @@ class ReconnectTests(unittest.TestCase):
             self.assertEqual(seen, [str(index) for index in range(180)])
             self.assertTrue(self.client.get("/state").json()["ui_connected"])
 
-    def test_simultaneous_upgrades_can_only_claim_one_owner(self):
+    def test_delayed_live_completions_do_not_overflow_a_connecting_clients_replay(self):
+        store = self.client.app.state.conversations
+        release = threading.Event()
+        original_apply = store.apply_transcript
+        original_send = WebSocket.send_json
+
+        def delayed_apply(*args):
+            if not release.wait(5):
+                raise AssertionError("Transcript persistence was not released")
+            return original_apply(*args)
+
+        async def release_after_ready(websocket, event, mode="text"):
+            await original_send(websocket, event, mode)
+            if event["type"] == "session.ready":
+                release.set()
+
+        try:
+            with patch.object(store, "apply_transcript", delayed_apply), patch.object(WebSocket, "send_json", release_after_ready):
+                # The inbox is durable before connection, but live notifications
+                # complete only after ready, overlapping its initial replay.
+                for index in range(180):
+                    self.runtime.publish(result(str(index), "chat"))
+                with self.connect() as socket:
+                    self.headers(socket)
+                    seen = []
+                    while len(seen) < 180:
+                        event = socket.receive_json()
+                        self.assertNotEqual(event["type"], "connection.error")
+                        if event["type"] == "transcription.completed":
+                            seen.append(event["recording_id"])
+                            socket.send_json({"type": "transcript.ack", "recording_id": event["recording_id"], "conversation_id": "chat"})
+                            if len(seen) == 1:
+                                # This result lands after replay's high-water mark.
+                                self.runtime.publish(result("later", "chat"))
+                    self.assertEqual(seen, [str(index) for index in range(180)])
+                    later = receive_type(socket, "transcription.completed", max_events=200)
+                    self.assertEqual(later["recording_id"], "later")
+                    socket.send_json({"type": "transcript.ack", "recording_id": "later", "conversation_id": "chat"})
+                    socket.send_json({"type": "session.ping", "id": 99})
+                    while True:
+                        event = socket.receive_json()
+                        self.assertNotEqual(event["type"], "transcription.completed", "A replayed result must not be delivered twice")
+                        if event["type"] == "session.pong":
+                            break
+                    self.assertTrue(self.client.get("/state").json()["ui_connected"])
+        finally:
+            release.set()
+
+    def test_simultaneous_upgrades_admit_independent_clients(self):
         accepted = []
         release_accept = threading.Event()
         keep_owner = threading.Event()
@@ -181,7 +228,7 @@ class ReconnectTests(unittest.TestCase):
                 thread.start()
             try:
                 outcomes = [results.get(timeout=3) for _ in tabs]
-                self.assertCountEqual(outcomes, ["owner", "rejected"])
+                self.assertCountEqual(outcomes, ["owner", "owner"])
                 self.assertTrue(self.client.get("/state").json()["ui_connected"])
             finally:
                 release_accept.set()
@@ -213,44 +260,43 @@ class ReconnectTests(unittest.TestCase):
             finally:
                 release.set()
 
-    def test_blocked_rejection_cannot_delay_current_owner_disconnect_cleanup(self):
+    def test_blocked_peer_ready_cannot_delay_recording_owner_disconnect_cleanup(self):
         blocked = threading.Event()
         release = threading.Event()
-        original_close = WebSocket.close
+        original_send = WebSocket.send_json
 
-        async def slow_rejection(websocket, code=1000, reason=None):
-            if code == 1008:
+        async def slow_ready(websocket, data, mode="text"):
+            if data["type"] == "session.ready":
                 blocked.set()
                 while not release.is_set():
                     await asyncio.sleep(0.005)
-            await original_close(websocket, code=code, reason=reason)
+            await original_send(websocket, data, mode)
 
         def second_tab():
-            try:
-                with self.connect() as rejected:
-                    self.headers(rejected)
-            except WebSocketDisconnect:
-                pass
+            with self.connect() as peer:
+                self.headers(peer)
 
-        with patch.object(WebSocket, "close", slow_rejection), self.connect() as owner:
+        with self.connect() as owner:
             headers = self.headers(owner)
             self.client.post("/shortcuts/fn", headers=headers, json={"enabled": True, "conversation_id": "chat"})
             self.wait_state(lambda state: state["fn_shortcut"]["status"] == "enabled")
             capture = self.capture.instances[-1]
             capture.on_key(True, time.monotonic())
             self.wait_state(lambda state: state["recording"] and state["pending_commands"] == 0)
-            peer = threading.Thread(target=second_tab)
-            peer.start()
-            try:
-                self.assertTrue(blocked.wait(3))
-                owner.close()
-                state = self.wait_state(lambda state: not state["ui_connected"] and not state["recording"] and state["pending_commands"] == 0)
-                self.assertEqual(state["fn_shortcut"]["status"], "disabled")
-                self.assertTrue(capture.closed.wait(3))
-            finally:
-                release.set()
-                peer.join(3)
-                self.assertFalse(peer.is_alive())
+            with patch.object(WebSocket, "send_json", slow_ready):
+                peer = threading.Thread(target=second_tab)
+                peer.start()
+                try:
+                    self.assertTrue(blocked.wait(3))
+                    owner.close()
+                    state = self.wait_state(lambda state: not state["recording"] and state["pending_commands"] == 0)
+                    self.assertTrue(state["ui_connected"])
+                    self.assertEqual(state["fn_shortcut"]["status"], "disabled")
+                    self.assertTrue(capture.closed.wait(3))
+                finally:
+                    release.set()
+                    peer.join(3)
+                    self.assertFalse(peer.is_alive())
 
     def test_event_overflow_revokes_fn_even_when_socket_sending_is_blocked(self):
         original_send = WebSocket.send_json

@@ -30,6 +30,8 @@ export const snapshotSchema = z.object({
     error: z.string().nullable(),
   }),
   recording: z.boolean(),
+  capture_owned: z.boolean(),
+  client_connected: z.boolean(),
   hands_free: z.boolean(),
   recording_id: z.string().nullable(),
   conversation_id: z.string().nullable(),
@@ -53,6 +55,7 @@ export const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('transcript.acknowledged'), recording_id: z.string(), conversation_id: z.string() }),
   z.object({ type: z.literal('session.ready'), session_id: z.string(), state: snapshotSchema }),
   z.object({ type: z.literal('state.updated'), state: snapshotSchema }),
+  z.object({ type: z.literal('conversation.updated'), conversation_id: z.string() }),
   z.object({
     type: z.literal('transcription.completed'),
     recording_id: z.string(),
@@ -74,5 +77,6 @@ export type PastError = {
 export type Snapshot = z.infer<typeof snapshotSchema>
 export type Transcript = {
   recordingId: string
+  conversationId: string
   text: string
 }

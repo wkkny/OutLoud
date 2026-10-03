@@ -85,8 +85,9 @@ class ServerTests(unittest.TestCase):
 
     def test_session_ready_matches_http_snapshot(self):
         with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
-            snapshot = receive_type(websocket, "session.ready")["state"]
-            self.assertEqual(snapshot, self.client.get("/state").json())
+            ready = receive_type(websocket, "session.ready")
+            snapshot = ready["state"]
+            self.assertEqual(snapshot, self.client.get("/state", headers={"X-Session-ID": ready["session_id"]}).json())
             self.assertTrue(snapshot["ui_connected"])
             encoded = json.dumps(snapshot)
             self.assertNotIn("session_id", encoded)
@@ -176,12 +177,14 @@ class ServerTests(unittest.TestCase):
             response = self.client.post("/recording/stop", headers={**ORIGIN, "X-Session-ID": ready["session_id"]})
             self.assertEqual(response.status_code, 202)
 
-    def test_one_tab_owns_session_and_disconnect_invalidates_token(self):
+    def test_tabs_connect_independently_and_disconnect_invalidates_only_own_token(self):
         with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:
             token = receive_type(websocket, "session.ready")["session_id"]
-            with self.assertRaises(WebSocketDisconnect):
-                with self.client.websocket_connect("/events", headers=ORIGIN):
-                    pass
+            with self.client.websocket_connect("/events", headers=ORIGIN) as other:
+                other_token = receive_type(other, "session.ready")["session_id"]
+                self.assertNotEqual(other_token, token)
+            self.assertEqual(self.client.post("/recording/stop", headers={**ORIGIN, "X-Session-ID": token}).status_code, 202)
+            self.assertEqual(self.client.post("/recording/stop", headers={**ORIGIN, "X-Session-ID": other_token}).status_code, 403)
         self.assertFalse(self.client.get("/state").json()["ui_connected"])
         self.assertEqual(self.client.post("/recording/stop", headers={**ORIGIN, "X-Session-ID": token}).status_code, 403)
         with self.client.websocket_connect("/events", headers=ORIGIN) as websocket:

@@ -2,9 +2,12 @@ import asyncio
 import json
 import logging
 import time
+import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+import anyio
 import httpx2
 from pydantic import BaseModel, Field, model_validator
 
@@ -52,6 +55,10 @@ class ChatBusy(RuntimeError):
     pass
 
 
+class ChatCapacityBusy(RuntimeError):
+    pass
+
+
 class ChatFailure(RuntimeError):
     pass
 
@@ -63,40 +70,77 @@ def ollama_client():
     )
 
 
+async def drain(operation):
+    """Wait without forwarding response-scope or repeated task cancellation."""
+    interrupted = False
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                result = await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError:
+                if operation.cancelled():
+                    raise
+                interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+    return result
+
+
 @dataclass
 class Generation:
     session_id: str
     request: ChatRequest
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=16))
     task: asyncio.Task | None = None
+    finalizing: bool = False
+    abandoned: bool = False
 
     def cancel(self):
-        # HTTP abort, Stop, owner revocation, and shutdown can all race. A second
-        # cancellation must not interrupt the first one's async HTTP cleanup.
-        if not self.task.done() and not self.task.cancelling():
+        # Once finalization starts, completion is irrevocable. An explicit Stop
+        # reports inactive and must not drop deltas from a successful response.
+        if self.finalizing or self.task.done():
+            return False
+        if not self.task.cancelling():
             self.task.cancel()
+        return True
+
+    def abandon(self):
+        # Only a disconnected stream or shutdown abandons queued output. Drain it
+        # without interrupting a durable final write or blocking terminal delivery.
+        self.abandoned = True
+        while not self.queue.empty():
+            self.queue.get_nowait()
+        self.cancel()
 
     def event(self, kind, **data):
         return {"type": f"chat.{kind}", "request_id": self.request.request_id, **data}
 
 
 class Chat:
-    """One owner-scoped generation, bounded streaming, and deliberate cancellation."""
+    """Conversation-scoped generations with a bounded app-wide concurrency limit."""
 
-    def __init__(self, client_factory=None):
+    def __init__(self, client_factory=None, *, store=None, max_concurrent=2, on_change=None):
+        if type(max_concurrent) is not int or max_concurrent < 1:
+            raise ValueError("max_concurrent must be a positive integer")
         self.client_factory = client_factory or ollama_client
-        self.active = None
+        self.store = store
+        self.on_change = on_change or (lambda conversation_id: None)
+        self.max_concurrent = max_concurrent
+        self.active = {}
 
     def start(self, session_id, request):
-        if self.active is not None:
-            raise ChatBusy("Gemma is already generating a reply. Stop it before sending again.")
+        if request.conversation_id in self.active:
+            raise ChatBusy("This conversation is already generating a reply. Stop it or wait, then try again.")
+        if len(self.active) >= self.max_concurrent:
+            raise ChatCapacityBusy("Gemma is busy with other conversations. Wait for a reply to finish, then retry.")
         generation = Generation(session_id, request)
-        self.active = generation
+        self.active[request.conversation_id] = generation
         generation.task = asyncio.create_task(self.generate(generation))
 
         def finished(task):
-            if self.active is generation:
-                self.active = None
+            if self.active.get(generation.request.conversation_id) is generation:
+                del self.active[generation.request.conversation_id]
             # Cancellation before the coroutine's first instruction never enters
             # its finally block. Still release ownership and finish the stream.
             if task.cancelled():
@@ -108,24 +152,48 @@ class Chat:
         return generation
 
     def cancel(self, session_id, request_id=None):
-        generation = self.active
-        if generation is None or generation.session_id != session_id:
-            return False
-        if request_id is not None and generation.request.request_id != request_id:
-            return False
-        generation.cancel()
-        return True
+        matches = [generation for generation in self.active.values()
+                   if generation.session_id == session_id and
+                   (request_id is None or generation.request.request_id == request_id)]
+        cancelled = False
+        for generation in matches:
+            cancelled = generation.cancel() or cancelled
+        return cancelled
 
-    async def close(self):
-        generation = self.active
+    def cancel_conversation(self, conversation_id):
+        generation = self.active.get(conversation_id)
         if generation is not None:
             generation.cancel()
-            await asyncio.gather(generation.task, return_exceptions=True)
+
+    async def close(self):
+        generations = list(self.active.values())
+        for generation in generations:
+            generation.abandon()
+        if generations:
+            await drain(asyncio.gather(*(generation.task for generation in generations), return_exceptions=True))
+
+    async def storage(self, method, *args):
+        # Cancellation cannot stop sqlite3 in a worker thread. Drain the operation
+        # before releasing the conversation slot, so a retry sees committed state.
+        operation = asyncio.create_task(asyncio.to_thread(method, *args))
+        return await drain(operation)
 
     async def generate(self, generation):
         started = time.monotonic()
         terminal = generation.event("error", message="Ollama ended without a complete reply.")
+        turn_id = str(uuid.uuid4())
+        turn_started = False
+        reply = ""
         try:
+            if self.store is not None:
+                history = await self.storage(self.store.context, generation.request.conversation_id)
+                # Only the latest user turn comes from the browser. Stored complete
+                # turns are authoritative; a stale/forged client history is ignored.
+                generation.request = ChatRequest(
+                    request_id=generation.request.request_id,
+                    conversation_id=generation.request.conversation_id,
+                    messages=[*history, generation.request.messages[-1]],
+                )
             async with asyncio.timeout(180), self.client_factory() as client:
                 async with client.stream("POST", "/api/chat", json={
                     "model": MODEL, "messages": generation.request.context(), "stream": True,
@@ -160,12 +228,17 @@ class Chat:
                             if not accepted:
                                 leading += text
                                 if leading.strip():
+                                    if self.store is not None:
+                                        turn_started = True
+                                        await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content)
+                                        self.on_change(generation.request.conversation_id)
                                     await generation.queue.put(generation.event("started", model=MODEL, context_tokens=CONTEXT_TOKENS))
                                     accepted = True
                                     text, leading = leading, ""
                             if accepted:
                                 if first_token is None:
                                     first_token = time.monotonic() - started
+                                reply += text
                                 await generation.queue.put(generation.event("delta", text=text))
                         if packet.get("done") is True:
                             if not accepted:
@@ -187,6 +260,10 @@ class Chat:
             terminal = generation.event("error", message="Ollama took too long to respond. Try again or restart Ollama.")
         except httpx2.ConnectError:
             terminal = generation.event("error", message="Cannot reach Ollama. Start it with: ollama serve")
+        except LookupError:
+            terminal = generation.event("error", message="Conversation was deleted. Create or select another chat.")
+        except sqlite3.OperationalError:
+            terminal = generation.event("error", message="Local conversation storage is busy or unavailable. Try again.")
         except ChatFailure as error:
             terminal = generation.event("error", message=str(error))
         except (httpx2.HTTPError, ValueError):
@@ -195,9 +272,22 @@ class Chat:
             logger.exception("Unexpected chat failure")
             terminal = generation.event("error", message="Chat failed. Check the backend terminal and try again.")
         finally:
+            generation.finalizing = True
+            if turn_started:
+                status = {"chat.done": "complete", "chat.cancelled": "cancelled"}.get(terminal["type"], "failed")
+                try:
+                    await self.storage(self.store.finish_turn, generation.request.conversation_id, turn_id, reply, status, terminal.get("metrics"))
+                    self.on_change(generation.request.conversation_id)
+                except asyncio.CancelledError:
+                    # The drain completed its transaction before propagating this
+                    # cancellation. Preserve the already-decided terminal result.
+                    pass
+                except sqlite3.Error:
+                    logger.exception("Could not persist chat result")
+                    terminal = generation.event("error", message="The reply could not be saved locally. Check storage and try again.")
             # Preserve queued deltas on ordinary completion/error. Cancellation
             # drops only unsent chunks so a stopped reply cannot keep streaming.
-            if terminal["type"] == "chat.cancelled":
+            if terminal["type"] == "chat.cancelled" or generation.abandoned:
                 while not generation.queue.empty():
                     generation.queue.get_nowait()
             await generation.queue.put(terminal)
@@ -210,5 +300,5 @@ class Chat:
                 if event["type"] in ("chat.done", "chat.error", "chat.cancelled"):
                     return
         finally:
-            generation.cancel()
-            await asyncio.gather(generation.task, return_exceptions=True)
+            generation.abandon()
+            await drain(asyncio.gather(generation.task, return_exceptions=True))
