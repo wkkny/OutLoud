@@ -172,16 +172,16 @@ or deploy the app.
 - **CI:** succeeds only when web validation and every backend matrix job pass.
   Failed, cancelled, or skipped validation jobs do not satisfy this check.
 
-The backend matrix keeps running after a platform fails so each platform reports
-its result. New commits cancel obsolete runs on the same PR. Dependency installs
-use the committed lockfiles; Linux installs PortAudio for sounddevice. Native
-Fn/Globe event-tap tests run only on macOS; shared shortcut behavior is tested on
-every platform. Tests need neither physical microphone access nor model downloads.
+CI uses the same `bun run check` command as local validation, filtered to the
+workspace for each job. The backend matrix keeps running after a platform fails
+so each platform reports its result. New commits cancel obsolete runs on the
+same PR. Native Fn/Globe event-tap tests run only on macOS; shared shortcut
+behavior is tested everywhere. Tests need neither physical microphone access
+nor model downloads.
 
-Use the aggregate **CI** check as the required status check in the `Protect main`
-GitHub ruleset after the first successful workflow run. Requiring it gates merges
-on every platform without tying branch settings to individual matrix job names.
-The other rules in that ruleset should remain unchanged.
+The aggregate **CI** check is the merge gate, so branch rules do not need to track
+individual matrix job names. If removing or renaming it, update the required
+status checks in GitHub's `Protect main` ruleset too.
 
 ## Repository layout
 
