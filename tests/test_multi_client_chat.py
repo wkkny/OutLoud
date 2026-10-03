@@ -62,6 +62,31 @@ class MultiClientChatTests(unittest.TestCase):
     def body(self, conversation_id, request_id="request", text="First"):
         return {"conversation_id": conversation_id, "request_id": request_id, "messages": [{"role": "user", "content": text}]}
 
+    def test_retry_of_accepted_request_replays_without_another_saved_turn_or_model_call(self):
+        conversation = self.create()
+        with self.connect(conversation) as socket:
+            headers = self.headers(socket)
+            body = self.body(conversation, "retry-same-message")
+            first = self.client.post("/chat", headers=headers, json=body)
+            self.assertEqual(first.status_code, 200)
+            before = self.client.get(f"/conversations/{conversation}").json()["messages"]
+            retried = self.client.post("/chat", headers=headers, json=body)
+            events = [json.loads(line) for line in retried.text.splitlines()]
+            self.assertEqual([event["type"] for event in events], ["chat.started", "chat.delta", "chat.done"])
+            self.assertEqual(events[1]["text"], "Hello")
+            after = self.client.get(f"/conversations/{conversation}").json()["messages"]
+            self.assertEqual(after, before)
+            self.assertEqual(len(self.requests), 1)
+            self.assertEqual(after[0]["request_id"], "retry-same-message")
+
+        self.client.__exit__(None, None, None)
+        self.client = self.open_client()
+        with self.connect(conversation) as socket:
+            replayed = self.client.post("/chat", headers=self.headers(socket), json=body)
+            self.assertEqual(json.loads(replayed.text.splitlines()[-1])["type"], "chat.done")
+            self.assertEqual(self.client.get(f"/conversations/{conversation}").json()["messages"], before)
+            self.assertEqual(len(self.requests), 1)
+
     def test_start_endpoint_binds_capture_and_transcript_to_durable_draft(self):
         first, second = self.create(), self.create()
         self.client.patch(f"/conversations/{first}", json={"draft": "Typed text"})

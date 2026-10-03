@@ -5,6 +5,7 @@ export const messageSchema = z.object({
   id: z.string(), role: z.enum(['user', 'assistant']), content: z.string(),
   status: z.enum(['streaming', 'complete', 'failed', 'cancelled']),
   metrics: z.record(z.string(), z.number()).nullable(), created_at: z.string(),
+  request_id: z.string().nullable().optional(),
 })
 const conversationSchema = z.object({
   id: z.string(), title: z.string(), draft: z.string(), draft_version: z.number().int().nonnegative(),

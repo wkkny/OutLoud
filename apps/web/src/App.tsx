@@ -11,7 +11,7 @@ import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
 import { useNotifications } from '@/hooks/use-notifications'
 import { useConversations } from '@/hooks/use-conversations'
-import { useChat } from '@/hooks/use-chat'
+import { useChat, type PendingSend } from '@/hooks/use-chat'
 import { AppSidebar } from '@/components/app-sidebar'
 import { ConversationActions } from '@/components/conversation-actions'
 import { Badge } from '@/components/ui/badge'
@@ -54,6 +54,7 @@ function ChatApp() {
   const composerText = draft ? [draft.text, unscopedDraft].filter(Boolean).join('\n') : unscopedDraft
   const hasUnsavedDraft = Boolean(draft && draft.text !== draft.base)
   const canSend = connected && Boolean(composerText.trim()) && (!selectedId || Boolean(draft)) && (!draft || draft.conflict === null) && !chat.busy && !sending && !creating
+  const canRetry = connected && (!selectedId || Boolean(draft)) && (!draft || draft.conflict === null) && !chat.busy && !sending && !creating
   const recovered = Object.entries(drafts).filter(([id, item]) => !list.some((conversation) => conversation.id === id) && item.text !== item.base)
   const createChat = () => {
     if (pendingCreation.current) return pendingCreation.current
@@ -70,22 +71,26 @@ function ChatApp() {
     return task
   }
   const ensureConversation = async () => selectedId ?? createChat()
-  const send = async () => {
-    if (!canSend) return
-    const text = composerText
+  const send = async (retry?: PendingSend) => {
+    if (retry ? !canRetry || retry.conversationId !== selectedId : !canSend) return
+    const text = retry?.text ?? composerText
+    const attempt = chat.prepare(selectedId, text, retry)
     setSending(true)
+    let started = false
     try {
       if (selectedId && unscopedDraft) {
-        library.edit(selectedId, text)
+        library.edit(selectedId, composerText)
         editUnscopedDraft('')
       }
       const id = await ensureConversation()
       if (!id) return
+      chat.attach(attempt.id, id)
       if (!await library.save(id)) return
       // An append/conflict during saving must be reviewed before sending.
-      if (library.getSnapshot().drafts[id]?.text !== text) return
-      void chat.send(id, text, () => { void library.clearAccepted(id, text) })
-    } finally { setSending(false) }
+      if (!retry && library.getSnapshot().drafts[id]?.text !== text) return
+      started = true
+      void chat.send(id, text, () => { void library.clearAccepted(id, text) }, attempt.id)
+    } finally { if (!started) chat.fail(attempt.id); setSending(false) }
   }
 
   return <TooltipProvider><SidebarProvider className="chat-app">
@@ -126,7 +131,7 @@ function ChatApp() {
             <MessageScroller>
               <MessageScrollerViewport aria-label="Conversation messages">
                 <MessageScrollerContent className="message-list">
-                  {chat.messages.map((message) => <MessageScrollerItem key={message.id} messageId={message.id} scrollAnchor={message.role === 'user'}><ChatMessage message={message} /></MessageScrollerItem>)}
+                  {chat.messages.map((message) => <MessageScrollerItem key={message.id} messageId={message.id} scrollAnchor={message.role === 'user'}><ChatMessage message={message} onRetry={message.pendingSend ? () => { void send(message.pendingSend) } : undefined} retryDisabled={!canRetry} /></MessageScrollerItem>)}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
               <MessageScrollerButton />

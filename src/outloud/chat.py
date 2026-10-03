@@ -186,6 +186,10 @@ class Chat:
         reply = ""
         try:
             if self.store is not None:
+                saved = await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id)
+                if saved:
+                    terminal = await self.replay(generation, saved)
+                    return
                 history = await self.storage(self.store.context, generation.request.conversation_id)
                 # Only the latest user turn comes from the browser. Stored complete
                 # turns are authoritative; a stale/forged client history is ignored.
@@ -230,7 +234,12 @@ class Chat:
                                 if leading.strip():
                                     if self.store is not None:
                                         turn_started = True
-                                        await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content)
+                                        inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id)
+                                        if not inserted:
+                                            turn_started = False
+                                            saved = await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id)
+                                            terminal = await self.replay(generation, saved)
+                                            return
                                         self.on_change(generation.request.conversation_id)
                                     await generation.queue.put(generation.event("started", model=MODEL, context_tokens=CONTEXT_TOKENS))
                                     accepted = True
@@ -291,6 +300,20 @@ class Chat:
                 while not generation.queue.empty():
                     generation.queue.get_nowait()
             await generation.queue.put(terminal)
+
+    async def replay(self, generation, messages):
+        """A lost acceptance may be retried, but must never create another turn."""
+        user, assistant = messages
+        if user["content"] != generation.request.messages[-1].content:
+            raise ChatFailure("This request was already used for a different message.")
+        await generation.queue.put(generation.event("started", model=MODEL, context_tokens=CONTEXT_TOKENS))
+        if assistant["content"]:
+            await generation.queue.put(generation.event("delta", text=assistant["content"]))
+        if assistant["status"] == "complete":
+            return generation.event("done", metrics=assistant["metrics"] or {"elapsed_seconds": 0})
+        # Recovery confirms the saved user turn without automatically generating
+        # a second answer to a previously accepted, interrupted request.
+        return generation.event("error", message="This message was already saved. Its partial reply has been kept.")
 
     async def stream(self, generation):
         try:

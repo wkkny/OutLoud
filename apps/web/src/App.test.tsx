@@ -126,6 +126,123 @@ it('lets the user compose before a conversation exists and creates one when send
   })
 })
 
+it('shows the first message immediately while its conversation is still being created', async () => {
+  backend.conversations.clear()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | undefined
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if (String(url).endsWith('/conversations') && init?.method === 'POST') {
+      return new Promise((resolve) => { release = () => { void baseFetch(url, init).then(resolve) } })
+    }
+    return baseFetch(url, init)
+  })
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  fireEvent.change(composer, { target: { value: 'Show these words now' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(within(screen.getByRole('article', { name: 'You' })).getByText('Show these words now')).toBeVisible()
+  expect(screen.getByText('Sending…')).toBeVisible()
+  expect(composer).toHaveValue('Show these words now')
+  await waitFor(() => expect(release).toBeDefined())
+  await act(async () => release!())
+  await screen.findByText('Local reply')
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  expect(screen.queryByText('Sending…')).not.toBeInTheDocument()
+  await waitFor(() => expect(composer).toHaveValue(''))
+})
+
+it('retries the failed bubble without duplicating it or replacing newer composer edits', async () => {
+  await open()
+  backend.setChatStatus(429)
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Not sent')
+  const bubble = screen.getByRole('article', { name: 'You' })
+  expect(within(bubble).getByText('Saved words')).toBeVisible()
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  expect(composer).toHaveValue('Saved words')
+  fireEvent.change(composer, { target: { value: 'Newer words for later' } })
+  backend.setChatStatus(200)
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | undefined
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if (String(url).endsWith('/chat')) return new Promise((resolve) => { release = () => { void baseFetch(url, init).then(resolve) } })
+    return baseFetch(url, init)
+  })
+  fireEvent.click(within(bubble).getByRole('button', { name: 'Retry' }))
+  await screen.findByText('Sending…')
+  expect(screen.getByRole('article', { name: 'You' })).toBe(bubble)
+  expect(composer).toHaveValue('Newer words for later')
+  await waitFor(() => expect(release).toBeDefined())
+  await act(async () => release!())
+  await screen.findByText('Local reply')
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  expect(composer).toHaveValue('Newer words for later')
+  const attempts = backend.requests.filter((request) => request.path === '/chat')
+  expect(attempts.map((request) => request.body.messages)).toEqual([
+    [{ role: 'user', content: 'Saved words' }], [{ role: 'user', content: 'Saved words' }],
+  ])
+  expect(attempts[1]?.body.request_id).toBe(attempts[0]?.body.request_id)
+})
+
+it('reconciles a saved message after a lost acceptance without retaining a duplicate retry bubble', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/chat')) throw new TypeError('Connection lost after acceptance')
+    return response
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Not sent')
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  await screen.findByText('Local reply')
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument())
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+})
+
+it('retries a lost confirmation using the original request and displays the saved reply once', async () => {
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let loseConfirmation = true
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/chat') && loseConfirmation) {
+      loseConfirmation = false
+      throw new TypeError('Connection lost after acceptance')
+    }
+    return response
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Not sent')
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await screen.findByText('Local reply')
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  expect(screen.getAllByRole('article', { name: 'Gemma' })).toHaveLength(1)
+})
+
+it('keeps a failed bubble in its own conversation across history reloads and chat switches', async () => {
+  await open()
+  backend.setChatStatus(429)
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Not sent')
+  act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  expect(screen.queryByText('Not sent')).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  await screen.findByText('Not sent')
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  backend.setChatStatus(200)
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await screen.findByText('Local reply')
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+})
+
 it.each([429, 503])('retries a refused first send in the same selected conversation after a %s response', async (status) => {
   backend.conversations.clear()
   backend.setChatStatus(status)

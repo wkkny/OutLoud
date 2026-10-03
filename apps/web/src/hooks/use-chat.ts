@@ -12,6 +12,8 @@ const eventSchema = z.discriminatedUnion('type', [
 ])
 
 type Status = SavedMessage['status']
+export type PendingSend = { id: string; conversationId: string | null; text: string; createdAt: string; delivery: 'sending' | 'failed' }
+export type ChatViewMessage = SavedMessage & { delivery?: PendingSend['delivery']; pendingSend?: PendingSend }
 type Run = { id: string; conversationId: string; sessionId: string; controller: AbortController; reader?: ReadableStreamDefaultReader<Uint8Array>; stopped: boolean }
 
 /** Live runs are keyed by conversation, not selection. Reloads cannot replace a live stream. */
@@ -19,12 +21,36 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
   const [live, setLive] = useState<Record<string, SavedMessage[]>>({})
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [pending, setPending] = useState<PendingSend[]>([])
+  const pendingRef = useRef<PendingSend[]>([])
   const history = useRef<Record<string, SavedMessage[]>>({})
   const runs = useRef(new Map<string, Run>())
   const mounted = useRef(true)
   const latestDetails = useRef(details)
   const observedHistory = useRef(historyRevisions)
   useEffect(() => { latestDetails.current = details }, [details])
+
+  const changePending = useCallback((transform: (previous: PendingSend[]) => PendingSend[]) => {
+    pendingRef.current = transform(pendingRef.current)
+    if (mounted.current) setPending(pendingRef.current)
+  }, [])
+  const prepare = (conversationId: string | null, text: string, retry?: PendingSend) => {
+    const previousAttempt = retry ?? pendingRef.current.findLast((item) => item.conversationId === conversationId && item.text === text && item.delivery === 'failed')
+    const item: PendingSend = previousAttempt ? { ...previousAttempt, delivery: 'sending' } : {
+      id: crypto.randomUUID(), conversationId, text, createdAt: new Date().toISOString(), delivery: 'sending',
+    }
+    changePending((previous) => [...previous.filter((entry) => entry.id !== item.id), item])
+    return item
+  }
+  const attach = (requestId: string, conversationId: string) => changePending((previous) => previous.map((item) => item.id === requestId ? { ...item, conversationId } : item))
+  const fail = (requestId: string) => changePending((previous) => previous.map((item) => item.id === requestId ? { ...item, delivery: 'failed' } : item))
+  const removePending = (requestId: string) => changePending((previous) => previous.filter((item) => item.id !== requestId))
+  useEffect(() => {
+    const confirmed = pendingRef.current.filter((item) => item.conversationId && details[item.conversationId]?.messages.some((message) => message.role === 'user' && message.request_id === item.id))
+    if (!confirmed.length) return
+    changePending((previous) => previous.filter((item) => !confirmed.some((entry) => entry.id === item.id)))
+    for (const item of confirmed) void library.clearAccepted(item.conversationId!, item.text)
+  }, [details, library, changePending])
 
   const update = useCallback((id: string, transform: (previous: SavedMessage[]) => SavedMessage[]) => {
     history.current = { ...history.current, [id]: transform(history.current[id] ?? latestDetails.current[id]?.messages ?? []) }
@@ -62,12 +88,12 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
     if (changed) { history.current = next; if (mounted.current) setLive(next) }
   }, [historyRevisions])
 
-  const send = async (id: string, draft: string, onAccepted: () => void) => {
+  const send = async (id: string, draft: string, onAccepted: () => void, requestId: string) => {
     const content = draft.trim()
-    if (!sessionId || runs.current.has(id) || !content) return
+    if (!sessionId || runs.current.has(id) || !content) { fail(requestId); return }
     const setError = (message: string) => { if (mounted.current) setErrors((previous) => ({ ...previous, [id]: message })) }
-    if (content.length > 12000) { setError('This message is too long. Shorten it to 12,000 characters or fewer.'); return }
-    const active: Run = { id: crypto.randomUUID(), conversationId: id, sessionId, controller: new AbortController(), stopped: false }
+    if (content.length > 12000) { fail(requestId); setError('This message is too long. Shorten it to 12,000 characters or fewer.'); return }
+    const active: Run = { id: requestId, conversationId: id, sessionId, controller: new AbortController(), stopped: false }
     runs.current.set(id, active)
     setBusyIds(new Set(runs.current.keys()))
     setErrors((previous) => { const next = { ...previous }; delete next[id]; return next })
@@ -105,11 +131,12 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
         if (event.type === 'chat.started') {
           if (accepted) throw new Error('The backend restarted a chat response unexpectedly.')
           accepted = true
+          removePending(active.id)
           // The history captured before acceptance is authoritative. Ignore WS reloads
           // racing chat.started (which already contain the newly accepted messages).
-          update(id, () => [...(details[id]?.messages ?? []),
-            { id: `${active.id}-user`, role: 'user', content, status: 'complete', metrics: null, created_at: new Date().toISOString() },
-            { id: `${active.id}-assistant`, role: 'assistant', content: '', status: 'streaming', metrics: null, created_at: new Date().toISOString() },
+          update(id, () => [...(details[id]?.messages ?? []).filter((message) => message.request_id !== active.id),
+            { id: `${active.id}-user`, request_id: active.id, role: 'user', content, status: 'complete', metrics: null, created_at: new Date().toISOString() },
+            { id: `${active.id}-assistant`, request_id: active.id, role: 'assistant', content: '', status: 'streaming', metrics: null, created_at: new Date().toISOString() },
           ])
           onAccepted()
         } else if (event.type === 'chat.delta') {
@@ -137,8 +164,10 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
       if (active.stopped && accepted) mark('cancelled')
     } catch (failure) {
       if (accepted) mark(active.stopped ? 'cancelled' : 'failed')
+      else fail(active.id)
       if (!active.stopped) setError(failure instanceof Error ? failure.message : 'Chat failed. Try again.')
     } finally {
+      if (!accepted && active.stopped) fail(active.id)
       await active.reader?.cancel().catch(() => undefined)
       // Keep the overlay until a post-stream authoritative reload completes.
       const beforeReload = library.getSnapshot().historyRevisions[id] ?? 0
@@ -151,10 +180,17 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
       if (mounted.current) setBusyIds(new Set(runs.current.keys()))
     }
   }
-  const messages = selectedId ? live[selectedId] ?? details[selectedId]?.messages ?? [] : []
+  const savedMessages = selectedId ? live[selectedId] ?? details[selectedId]?.messages ?? [] : []
+  const messages: ChatViewMessage[] = [
+    ...savedMessages.map((message) => ({ ...message, id: message.request_id ? `${message.request_id}-${message.role}` : message.id })),
+    ...pending.filter((item) => item.conversationId === selectedId && !savedMessages.some((message) => message.request_id === item.id)).map((item): ChatViewMessage => ({
+      id: `${item.id}-user`, role: 'user', content: item.text.trim(), status: 'complete', metrics: null,
+      created_at: item.createdAt, delivery: item.delivery, pendingSend: item,
+    })),
+  ]
   const ownedBusy = selectedId ? busyIds.has(selectedId) : false
   const busy = ownedBusy || messages.some((message) => message.status === 'streaming')
-  return { messages, busy, ownedBusy, error: selectedId ? errors[selectedId] : null, send,
+  return { messages, busy, ownedBusy, error: selectedId ? errors[selectedId] : null, send, prepare, attach, fail,
     stop: () => { const active = selectedId ? runs.current.get(selectedId) : undefined; if (active) void stopRun(active) },
   }
 }
