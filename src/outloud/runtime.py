@@ -19,6 +19,10 @@ class RuntimeUnavailable(RuntimeError):
     pass
 
 
+class RecordingBusy(RuntimeError):
+    pass
+
+
 class RecordingRuntime:
     """Own workers and publish atomic, metadata-only state snapshots."""
 
@@ -168,6 +172,7 @@ class RecordingRuntime:
                 self.remember_error("recording", event)
             if event_type != "recording.command_completed" and deliver:
                 self.notify(event)
+            self.release_idle_capture()
             self.state_changed()
 
     def run_worker(self, name, target, args, started):
@@ -227,26 +232,36 @@ class RecordingRuntime:
         for event in started.values():
             event.wait()
 
-    def claim_owner(self, session_id):
+    def owns_capture(self, session_id):
         with self.lock:
-            self.owner_session_id = session_id
-            self.fn_shortcut.disable()
+            return session_id is not None and self.owner_session_id == session_id
+
+    def release_idle_capture(self):
+        # Keep the reservation through queued starts/stops and delayed hold-release
+        # finalization. A newly connected client must not steal a pending start.
+        if (self.pending_commands == 0 and not self.recording["recording"]
+                and not self.recording_reserved
+                and self.fn_shortcut.state["status"] not in ("starting", "enabled")):
+            self.owner_session_id = None
 
     def release_owner(self, session_id):
         with self.lock:
             if self.owner_session_id != session_id:
                 return
-            self.owner_session_id = None
             self.fn_shortcut.disable()
             self.stop_recording(session_id)
+            self.release_idle_capture()
 
     def configure_fn(self, session_id, enabled, conversation_id):
         with self.lock:
-            if self.owner_session_id != session_id:
-                raise RuntimeUnavailable("An active owner session is required")
+            if self.owner_session_id not in (None, session_id):
+                raise RecordingBusy("Recording is active in another client")
             if enabled and not self.readiness()["ready"]:
                 raise RuntimeUnavailable("Required workers are unavailable; restart the backend")
+            if enabled:
+                self.owner_session_id = session_id
             self.fn_shortcut.configure(enabled, session_id, conversation_id)
+            self.release_idle_capture()
 
     def command(self, action, session_id, conversation_id=None, *, timestamp=None, source="ui"):
         with self.lock:
@@ -254,11 +269,16 @@ class RecordingRuntime:
             required = ("recording",) if action in ("release", "stop") else tuple(self.workers)
             if self.shutting_down or not all(self.worker_running(name) for name in required):
                 raise RuntimeUnavailable("Required workers are unavailable; restart the backend")
-            if action in ("press", "hands-free") and not self.recording_reserved and self.capacity()["available"] == 0:
+            if action == "start" and self.owner_session_id is not None:
+                raise RecordingBusy("Recording is already active or starting. Stop it before recording again.")
+            if self.owner_session_id not in (None, session_id):
+                raise RecordingBusy("Recording is active in another client")
+            if action in ("press", "hands-free", "start") and not self.recording_reserved and self.capacity()["available"] == 0:
                 raise CapacityUnavailable()
+            self.owner_session_id = session_id
             self.pending_commands += 1
             self.events.put({
-                "action": action,
+                "action": "hands-free" if action == "start" else action,
                 "timestamp": time.monotonic() if timestamp is None else timestamp,
                 "source": source,
                 "session_id": session_id,
@@ -273,7 +293,7 @@ class RecordingRuntime:
             # Disconnect cleanup may race shutdown or an already exited worker.
             pass
 
-    def stop(self):
+    def stop(self, *, close_transcripts=True):
         with self.lock:
             if self.shutting_down:
                 return
@@ -285,4 +305,5 @@ class RecordingRuntime:
         self.threads["recording"].join()
         self.recordings.put(None)
         self.threads["transcription"].join()
-        self.transcripts.close()
+        if close_transcripts:
+            self.transcripts.close()

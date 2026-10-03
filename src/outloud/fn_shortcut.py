@@ -88,6 +88,7 @@ class FnShortcut:
             self.disable(message)
             if could_have_recorded:
                 self.runtime.stop_recording(session_id)
+            self.runtime.release_idle_capture()
 
     def key(self, generation, pressed, timestamp):
         with self.runtime.lock:

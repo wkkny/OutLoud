@@ -78,6 +78,10 @@ class TranscriptInbox:
             )
             return True
 
+    def delete_conversation(self, conversation_id):
+        with self.lock, self.database:
+            self.database.execute("DELETE FROM results WHERE conversation_id=?", (conversation_id,))
+
     def close(self):
         with self.lock:
             self.database.close()

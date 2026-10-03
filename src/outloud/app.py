@@ -53,6 +53,9 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
             notify({"type": "recording.state", **state})
 
     def recover(error):
+        # A failed start can leave a source marked down even though capture has
+        # been released. A retry (including another client) needs a fresh press.
+        pressed_sources.clear()
         failed_recording_id = recording_id
         try:
             controls.stop()
@@ -84,6 +87,10 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
                 if event == "tick":
                     controls.tick(time.monotonic())
                 elif isinstance(event, dict):
+                    # Retain duplicate-press suppression within a client, but an
+                    # idle handoff must not inherit the previous client's holds.
+                    if not controls.recording and event["session_id"] != context["session_id"]:
+                        pressed_sources.clear()
                     action = event["action"]
                     if action == "stop":
                         pressed_sources.clear()

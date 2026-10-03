@@ -35,16 +35,17 @@ class ChatTests(unittest.TestCase):
         )
         self.client = LocalTestClient(self.app, base_url="http://127.0.0.1:8765")
         self.client.__enter__()
+        self.conversation_id = self.client.post("/conversations", json={}).json()["id"]
         self.addCleanup(lambda: self.client.__exit__(None, None, None))
 
     def headers(self, socket):
         return {**ORIGIN, "X-Session-ID": receive_type(socket, "session.ready")["session_id"]}
 
     def body(self, request_id="request-one"):
-        return {"request_id": request_id, "conversation_id": "chat", "messages": [{"role": "user", "content": "Hello"}]}
+        return {"request_id": request_id, "conversation_id": self.conversation_id, "messages": [{"role": "user", "content": "Hello"}]}
 
     def test_owner_can_stream_gemma_reply_with_bounded_context_and_metrics(self):
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             response = self.client.post("/chat", headers=self.headers(socket), json=self.body())
             self.assertEqual(response.status_code, 200)
             events = [json.loads(line) for line in response.text.splitlines()]
@@ -59,7 +60,7 @@ class ChatTests(unittest.TestCase):
         async def unavailable(request):
             raise httpx2.ConnectError("secret diagnostics", request=request)
         self.handler = unavailable
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             events = [json.loads(line) for line in self.client.post("/chat", headers=headers, json=self.body()).text.splitlines()]
             self.assertEqual(events[0]["type"], "chat.error")
@@ -69,7 +70,7 @@ class ChatTests(unittest.TestCase):
             self.assertTrue(self.client.get("/state").json()["ui_connected"])
 
     def test_missing_model_and_invalid_stream_have_clear_terminal_errors(self):
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             for status, content, expected in (
                 (404, '', 'ollama pull gemma3:4b'),
@@ -85,7 +86,7 @@ class ChatTests(unittest.TestCase):
                 self.assertIn(expected, terminal["message"])
 
     def test_empty_or_whitespace_only_reply_never_accepts_the_draft(self):
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             for text in ("", " \n\t"):
                 async def empty(request):
@@ -105,14 +106,16 @@ class ChatTests(unittest.TestCase):
             ]
             return httpx2.Response(200, content="".join(json.dumps(packet) + "\n" for packet in packets))
         self.handler = leading
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             response = self.client.post("/chat", headers=self.headers(socket), json=self.body())
             events = [json.loads(line) for line in response.text.splitlines()]
             self.assertEqual([event["type"] for event in events], ["chat.started", "chat.delta", "chat.done"])
             self.assertEqual(events[1]["text"], " \nHello")
 
     def test_large_history_trims_old_pairs_but_keeps_latest_user_text(self):
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        self.app.state.conversations.append_message(self.conversation_id, "user", "x" * 7000)
+        self.app.state.conversations.append_message(self.conversation_id, "assistant", "Earlier reply" * 1100)
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             body = {**self.body(), "messages": [
                 {"role": "user", "content": "x" * 7000},
                 {"role": "assistant", "content": "Earlier reply" * 1100},
@@ -123,7 +126,7 @@ class ChatTests(unittest.TestCase):
 
     def test_requires_owner_and_matching_conversation_and_valid_turns(self):
         self.assertEqual(self.client.post("/chat", json=self.body()).status_code, 403)
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             wrong = {**self.body(), "conversation_id": "other"}
             self.assertEqual(self.client.post("/chat", headers=headers, json=wrong).status_code, 403)
@@ -148,7 +151,7 @@ class ChatTests(unittest.TestCase):
             return httpx2.Response(200, stream=WaitingReply())
 
         self.handler = waiting
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             replies = []
             worker = threading.Thread(target=lambda: replies.append(self.client.post("/chat", headers=headers, json=self.body())))
@@ -188,7 +191,7 @@ class ChatTests(unittest.TestCase):
             return httpx2.Response(200, stream=ClosingReply())
 
         self.handler = response
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             worker = threading.Thread(target=lambda: self.client.post("/chat", headers=headers, json=self.body()))
             worker.start()
@@ -221,7 +224,7 @@ class ChatTests(unittest.TestCase):
             return httpx2.Response(200, stream=SlowReply())
 
         self.handler = slow
-        with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             headers = self.headers(socket)
             replies = []
             worker = threading.Thread(target=lambda: replies.append(self.client.post("/chat", headers=headers, json=self.body())))

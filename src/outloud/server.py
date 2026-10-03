@@ -1,8 +1,10 @@
 import asyncio
 import itertools
+import logging
 import os
 from pathlib import Path
 import secrets
+import sqlite3
 import time
 from typing import Literal
 from contextlib import asynccontextmanager
@@ -15,9 +17,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .runtime import RecordingRuntime, RuntimeUnavailable
+from .runtime import RecordingRuntime, RecordingBusy, RuntimeUnavailable
 from .capacity import CapacityUnavailable
-from .chat import Chat, ChatBusy, ChatRequest
+from .chat import Chat, ChatBusy, ChatCapacityBusy, ChatRequest, drain
+from .conversations import ConversationStore, DraftConflict
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_ORIGINS = {
     "http://localhost:5173",
@@ -39,6 +44,16 @@ class ChatCancelRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=128)
 
 
+class ConversationCreate(BaseModel):
+    title: str = Field(default="New chat", min_length=1, max_length=200)
+
+
+class ConversationUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    draft: str | None = Field(default=None, max_length=65536)
+    draft_version: int | None = Field(default=None, strict=True, ge=0)
+
+
 class Heartbeat(BaseModel):
     type: Literal["session.ping"]
     id: int = Field(strict=True, ge=0, le=9007199254740991)
@@ -52,12 +67,14 @@ class TranscriptAck(PressRequest):
 client_message = TypeAdapter(Heartbeat | TranscriptAck)
 
 
-class OwnerConnection:
-    def __init__(self, session_id, websocket, inbox, revoke, *, conversation_id=None, lease_seconds=90, clock=time.monotonic):
+class ClientConnection:
+    def __init__(self, session_id, websocket, inbox, revoke, acknowledged, prepare_transcript, *, conversation_id=None, lease_seconds=90, clock=time.monotonic):
         self.session_id = session_id
         self.websocket = websocket
         self.inbox = inbox
         self.revoke = revoke
+        self.acknowledged = acknowledged
+        self.prepare_transcript = prepare_transcript
         self.conversation_id = conversation_id
         self.lease_seconds = lease_seconds
         self.clock = clock
@@ -84,7 +101,7 @@ class OwnerConnection:
         if completed:
             if self.conversation_id is not None and event["conversation_id"] != self.conversation_id:
                 return
-        elif event.get("session_id") not in (None, self.session_id):
+        elif event["type"] != "recording.state" and event.get("session_id") not in (None, self.session_id):
             return
         public_event = {key: value for key, value in event.items() if key != "session_id"}
         target = self.controls if event["type"] in ("session.pong", "pong", "transcript.acknowledged") else self.events
@@ -108,6 +125,8 @@ class OwnerConnection:
 
     async def send(self, event):
         if event["type"] == "transcription.completed":
+            if not await self.prepare_transcript(event):
+                return
             recording_id = event["recording_id"]
             if recording_id in self.in_flight:
                 return
@@ -132,7 +151,7 @@ class OwnerConnection:
     async def send_events(self, state_snapshot):
         await self.send({
             "type": "session.ready", "session_id": self.session_id,
-            "state": state_snapshot(),
+            "state": state_snapshot(self.session_id),
         })
         self.ready_sent.set()
         # Stream replay directly: a backlog larger than the event queue must not
@@ -166,7 +185,7 @@ class OwnerConnection:
         while True:
             parsed = await self.acknowledgements.get()
             if await asyncio.to_thread(self.inbox.acknowledge, parsed.recording_id, parsed.conversation_id):
-                self.release_delivery(parsed.recording_id)
+                self.acknowledged(parsed.recording_id)
                 self.deliver({
                     "type": "transcript.acknowledged", "recording_id": parsed.recording_id,
                     "conversation_id": parsed.conversation_id,
@@ -217,38 +236,104 @@ def production_runtime(publish):
     )
 
 
-def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic, ollama_client_factory=None):
+def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic, ollama_client_factory=None, conversations_path=None):
+    production = runtime_factory is None
     runtime_factory = runtime_factory or production_runtime
-    owner = None
+    clients = {}
     loop = None
+    background = set()
+    if conversations_path is None:
+        conversations_path = os.environ.get("OUTLOUD_CONVERSATIONS_DB")
+        if conversations_path is None and production:
+            conversations_path = Path("recordings/conversations.sqlite3")
+
+    def broadcast(event):
+        for connection in list(clients.values()):
+            public_event = event
+            if event["type"] == "state.updated":
+                public_event = {**event, "state": {
+                    **event["state"], "ui_connected": bool(clients),
+                    "client_connected": connection.alive(),
+                    "capture_owned": app.state.runtime.owns_capture(connection.session_id),
+                }}
+            connection.deliver(public_event)
+
+    def conversation_changed(conversation_id):
+        broadcast({"type": "conversation.updated", "conversation_id": conversation_id})
+
+    def persist_transcript(event):
+        store = app.state.conversations
+        allowed, applied = store.apply_transcript(event["recording_id"], event["conversation_id"], event["text"])
+        if not allowed:
+            app.state.runtime.transcripts.delete_conversation(event["conversation_id"])
+            return False, applied
+        return True, applied
+
+    async def complete_write(operation):
+        # An accepted mutation includes its cleanup and metadata notification.
+        # Request/socket cancellation must not strand a committed database write.
+        task = asyncio.create_task(operation)
+        background.add(task)
+        task.add_done_callback(background.discard)
+        return await drain(task)
+
+    async def prepare_transcript(event):
+        async def commit():
+            allowed, applied = await asyncio.to_thread(persist_transcript, event)
+            if applied:
+                conversation_changed(event["conversation_id"])
+            return allowed
+        return await complete_write(commit())
+
+    async def complete_transcript(event):
+        try:
+            if await prepare_transcript(event):
+                broadcast(event)
+            conversation_changed(event["conversation_id"])
+        except sqlite3.Error:
+            # The inbox retains the original text. Reconnect/restart replay will
+            # retry the transaction before exposing the result to a browser.
+            logger.exception("Could not append transcript to saved draft")
+            broadcast({"type": "transcription.error", "message": "Transcript is saved but the draft could not be updated. Reconnect to retry."})
 
     def publish(event):
-        connection = owner
-        if connection is None:
-            return
-
         def deliver():
-            if owner is connection:
-                public_event = event
-                if event["type"] == "state.updated":
-                    public_event = {**event, "state": {**event["state"], "ui_connected": True}}
-                connection.deliver(public_event)
+            if event["type"] == "transcription.completed":
+                task = asyncio.create_task(complete_transcript(event))
+                background.add(task)
+                task.add_done_callback(background.discard)
+            else:
+                broadcast(event)
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(deliver)
 
     @asynccontextmanager
     async def lifespan(app):
         nonlocal loop
+        # Validate generation configuration before opening stores or workers.
+        chat = Chat(ollama_client_factory, max_concurrent=int(os.environ.get("OUTLOUD_MAX_CHAT_GENERATIONS", "2")))
         loop = asyncio.get_running_loop()
         runtime = runtime_factory(publish)
         app.state.runtime = runtime
-        app.state.chat = Chat(ollama_client_factory)
+        app.state.conversations = await asyncio.to_thread(ConversationStore, conversations_path)
+        chat.store = app.state.conversations
+        chat.on_change = conversation_changed
+        app.state.chat = chat
+        # Recover inbox results even when no browser is connected after restart.
+        def recover_drafts():
+            for event in runtime.transcripts.replay():
+                persist_transcript(event)
+        await asyncio.to_thread(recover_drafts)
         runtime.start()
         try:
             yield
         finally:
             await app.state.chat.close()
-            await asyncio.to_thread(runtime.stop)
+            await asyncio.to_thread(runtime.stop, close_transcripts=False)
+            if background:
+                await drain(asyncio.gather(*list(background), return_exceptions=True))
+            await asyncio.to_thread(runtime.transcripts.close)
+            await asyncio.to_thread(app.state.conversations.close)
             loop = None
 
     app = FastAPI(title="OutLoud", lifespan=lifespan)
@@ -256,7 +341,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
     app.add_middleware(
         CORSMiddleware,
         allow_origins=sorted(ALLOWED_ORIGINS),
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "X-Session-ID"],
     )
 
@@ -267,36 +352,96 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
             return JSONResponse({"detail": "Origin is not allowed"}, status_code=403)
         return await call_next(request)
 
+    @app.exception_handler(DraftConflict)
+    async def draft_conflict(request, error):
+        return JSONResponse({"detail": str(error)}, status_code=409)
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def database_error(request, error):
+        # Never expose paths or raw database diagnostics to the browser.
+        return JSONResponse({"detail": "Local conversation storage is busy or unavailable. Try again."}, status_code=503, headers={"Retry-After": "1"})
+
     def revoke(connection):
-        nonlocal owner
         connection.active = False
-        if owner is connection:
+        if clients.get(connection.session_id) is connection:
+            del clients[connection.session_id]
             app.state.runtime.release_owner(connection.session_id)
             app.state.chat.cancel(connection.session_id)
-            owner = None
 
-    def live_owner():
-        if owner is not None and not owner.alive():
-            revoke(owner)
-        return owner
+    def acknowledge_delivery(recording_id):
+        # A result is acknowledged globally. Release every client's credit so a
+        # second subscriber cannot exhaust its window on already-acknowledged IDs.
+        for connection in clients.values():
+            connection.release_delivery(recording_id)
 
-    async def require_owner(request: Request):
-        connection = live_owner()
-        session_id = request.headers.get("x-session-id", "")
-        if connection is None or not secrets.compare_digest(session_id, connection.session_id):
-            raise HTTPException(status_code=403, detail="An active owner session is required")
-        return connection.session_id
+    def require_live_client(session_id):
+        connection = clients.get(session_id)
+        if connection is not None and not connection.alive():
+            revoke(connection)
+            connection = None
+        if connection is None:
+            raise HTTPException(status_code=403, detail="An active client session is required")
+        return connection
+
+    async def require_client(request: Request):
+        return require_live_client(request.headers.get("x-session-id", "")).session_id
+
+    @app.get("/conversations")
+    async def list_conversations():
+        return await asyncio.to_thread(app.state.conversations.list)
+
+    @app.post("/conversations", status_code=201)
+    async def create_conversation(body: ConversationCreate):
+        async def commit():
+            conversation = await asyncio.to_thread(app.state.conversations.create, body.title)
+            conversation_changed(conversation["id"])
+            return conversation
+        return await complete_write(commit())
+
+    @app.get("/conversations/{conversation_id}")
+    async def get_conversation(conversation_id: str):
+        conversation = await asyncio.to_thread(app.state.conversations.get, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return conversation
+
+    @app.patch("/conversations/{conversation_id}")
+    async def update_conversation(conversation_id: str, body: ConversationUpdate):
+        async def commit():
+            conversation = await asyncio.to_thread(app.state.conversations.update, conversation_id, title=body.title, draft=body.draft, draft_version=body.draft_version)
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            conversation_changed(conversation_id)
+            return conversation
+        return await complete_write(commit())
+
+    @app.delete("/conversations/{conversation_id}", status_code=204)
+    async def delete_conversation(conversation_id: str):
+        async def commit():
+            if not await asyncio.to_thread(app.state.conversations.delete, conversation_id):
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            app.state.chat.cancel_conversation(conversation_id)
+            await asyncio.to_thread(app.state.runtime.transcripts.delete_conversation, conversation_id)
+            conversation_changed(conversation_id)
+        await complete_write(commit())
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
 
-    def state_snapshot():
-        return {**app.state.runtime.snapshot(), "ui_connected": owner is not None}
+    def state_snapshot(session_id=None):
+        connection = clients.get(session_id)
+        return {
+            **app.state.runtime.snapshot(), "ui_connected": bool(clients),
+            "client_connected": connection is not None and connection.alive(),
+            "capture_owned": app.state.runtime.owns_capture(session_id),
+        }
 
     def submit(action, session_id, conversation_id=None):
         try:
             app.state.runtime.command(action, session_id, conversation_id)
+        except RecordingBusy as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except CapacityUnavailable as error:
             raise HTTPException(status_code=429, detail=str(error)) from error
         except RuntimeUnavailable as error:
@@ -308,57 +453,74 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         return JSONResponse(readiness, status_code=200 if readiness["ready"] else 503)
 
     @app.get("/state")
-    async def state():
-        return state_snapshot()
+    async def state(request: Request):
+        return state_snapshot(request.headers.get("x-session-id"))
 
     @app.post("/chat")
-    async def chat(body: ChatRequest, session_id=Depends(require_owner)):
-        if owner.conversation_id is not None and owner.conversation_id != body.conversation_id:
-            raise HTTPException(status_code=403, detail="Chat must use the owner's conversation")
+    async def chat(body: ChatRequest, session_id=Depends(require_client)):
+        connection = require_live_client(session_id)
+        if connection.conversation_id is not None and connection.conversation_id != body.conversation_id:
+            raise HTTPException(status_code=403, detail="Chat must use the client's conversation")
+        if await asyncio.to_thread(app.state.conversations.get, body.conversation_id) is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        # The database read yields; expiry/disconnect during it must not start a
+        # model task under a token already revoked by another coroutine.
+        require_live_client(session_id)
         try:
             generation = app.state.chat.start(session_id, body)
         except ChatBusy as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        except ChatCapacityBusy as error:
+            raise HTTPException(status_code=429, detail=str(error)) from error
         return StreamingResponse(
             app.state.chat.stream(generation), media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
     @app.post("/chat/cancel", status_code=202)
-    async def cancel_chat(body: ChatCancelRequest, session_id=Depends(require_owner)):
+    async def cancel_chat(body: ChatCancelRequest, session_id=Depends(require_client)):
         return {"accepted": True, "active": app.state.chat.cancel(session_id, body.request_id)}
 
+    @app.post("/recording/start", status_code=202)
+    async def start_recording(body: PressRequest, session_id=Depends(require_client)):
+        if await asyncio.to_thread(app.state.conversations.get, body.conversation_id) is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        require_live_client(session_id)
+        submit("start", session_id, body.conversation_id)
+        return {"accepted": True}
+
     @app.post("/recording/press", status_code=202)
-    async def press(body: PressRequest, session_id=Depends(require_owner)):
+    async def press(body: PressRequest, session_id=Depends(require_client)):
         submit("press", session_id, body.conversation_id)
         return {"accepted": True}
 
     @app.post("/recording/hands-free", status_code=202)
-    async def hands_free(body: PressRequest, session_id=Depends(require_owner)):
+    async def hands_free(body: PressRequest, session_id=Depends(require_client)):
         submit("hands-free", session_id, body.conversation_id)
         return {"accepted": True}
 
     @app.post("/recording/release", status_code=202)
-    async def release(session_id=Depends(require_owner)):
+    async def release(session_id=Depends(require_client)):
         submit("release", session_id)
         return {"accepted": True}
 
     @app.post("/recording/stop", status_code=202)
-    async def stop(session_id=Depends(require_owner)):
+    async def stop(session_id=Depends(require_client)):
         submit("stop", session_id)
         return {"accepted": True}
 
     @app.post("/shortcuts/fn", status_code=202)
-    async def configure_fn(body: FnRequest, session_id=Depends(require_owner)):
+    async def configure_fn(body: FnRequest, session_id=Depends(require_client)):
         try:
             app.state.runtime.configure_fn(session_id, body.enabled, body.conversation_id)
+        except RecordingBusy as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except RuntimeUnavailable as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return {"accepted": True}
 
     @app.websocket("/events")
     async def events(websocket: WebSocket):
-        nonlocal owner
         if websocket.headers.get("origin") not in ALLOWED_ORIGINS:
             await websocket.close(code=1008)
             return
@@ -366,24 +528,15 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         if conversation_id is not None and not 1 <= len(conversation_id) <= 128:
             await websocket.close(code=1003, reason="Invalid conversation ID")
             return
-        if live_owner() is not None:
-            await websocket.close(code=1008, reason="Another tab owns the recording session")
-            return
         await websocket.accept()
-        # Accept may yield while another connection claims ownership. Recheck and
-        # claim without an await; never hold a lock across a peer's blocked I/O.
-        if live_owner() is not None:
-            await websocket.close(code=1008, reason="Another tab owns the recording session")
-            return
-        connection = OwnerConnection(
-            secrets.token_urlsafe(32), websocket, app.state.runtime.transcripts, revoke,
+        connection = ClientConnection(
+            secrets.token_urlsafe(32), websocket, app.state.runtime.transcripts, revoke, acknowledge_delivery, prepare_transcript,
             conversation_id=conversation_id, lease_seconds=owner_lease_seconds, clock=clock,
         )
-        owner = connection
-        app.state.runtime.claim_owner(connection.session_id)
+        clients[connection.session_id] = connection
         tasks = []
         try:
-            # Watch ownership and receive disconnects even if the initial ready
+            # Receive disconnects and watch liveness even if the initial ready
             # write stalls. The sender keeps ready ahead of all other messages.
             tasks = [
                 asyncio.create_task(connection.send_events(state_snapshot)),
@@ -398,9 +551,9 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
             pass
         finally:
-            # Finish releasing ownership even if the ASGI server cancels this task.
+            # Finish client cleanup even if the ASGI server cancels this task.
             with anyio.CancelScope(shield=True):
-                # Old socket cleanup cannot revoke a replacement owner.
+                # Revoke only this client, never another tab or its recording.
                 revoke(connection)
                 for task in tasks:
                     task.cancel()
