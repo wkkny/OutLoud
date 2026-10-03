@@ -159,6 +159,30 @@ uv run python -m outloud
 uv run python -m outloud.metrics
 ```
 
+## Continuous integration
+
+GitHub Actions runs [CI](.github/workflows/ci.yml) on every pull request targeting
+`main`, including documentation-only changes. It does not run on branch pushes
+or deploy the app.
+
+- **Web (Linux):** Vitest tests, TypeScript checking and the Vite build, and oxlint.
+- **Backend (Linux, Windows, macOS):** the Python unittest suite, lockfile validation,
+  and installed-package compatibility checks. Python follows `.python-version`;
+  Bun follows `package.json`'s `packageManager` field.
+- **CI:** succeeds only when web validation and every backend matrix job pass.
+  Failed, cancelled, or skipped validation jobs do not satisfy this check.
+
+The backend matrix keeps running after a platform fails so each platform reports
+its result. New commits cancel obsolete runs on the same PR. Dependency installs
+use the committed lockfiles; Linux installs PortAudio for sounddevice. Native
+Fn/Globe event-tap tests run only on macOS; shared shortcut behavior is tested on
+every platform. Tests need neither physical microphone access nor model downloads.
+
+Use the aggregate **CI** check as the required status check in the `Protect main`
+GitHub ruleset after the first successful workflow run. Requiring it gates merges
+on every platform without tying branch settings to individual matrix job names.
+The other rules in that ruleset should remain unchanged.
+
 ## Repository layout
 
 ```text
