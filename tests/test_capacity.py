@@ -1,5 +1,4 @@
 import json
-import shutil
 import sqlite3
 import threading
 import time
@@ -124,9 +123,9 @@ class CapacityTests(unittest.TestCase):
         with self.client.websocket_connect("/events?conversation_id=chat", headers=ORIGIN) as socket:
             headers = {**ORIGIN, "X-Session-ID": receive_type(socket, "session.ready")["session_id"]}
             self.start_recording(headers)
-            # Remove only the delivery database directory: its open connection
-            # can no longer create a rollback journal. Audio storage still works.
-            shutil.rmtree(Path(self.directory.name) / "delivery")
+            # Block rollback-journal creation without deleting the open database,
+            # which Windows forbids. Audio storage still works on every platform.
+            (Path(self.directory.name) / "delivery" / "inbox.sqlite3-journal").mkdir()
             self.finish.set()
             self.client.post("/recording/stop", headers=headers)
             receive_type(socket, "transcription.error", max_events=80)
