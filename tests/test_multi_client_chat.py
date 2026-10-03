@@ -412,26 +412,39 @@ class MultiClientChatTests(unittest.TestCase):
             release.set()
 
     def test_database_lock_does_not_block_health_and_returns_busy(self):
+        store = self.app.state.conversations
+        # Exercise SQLite's real busy error without spending nearly the entire
+        # test deadline in its default five-second busy timeout.
+        with store.lock:
+            store.db.execute("PRAGMA busy_timeout=50")
         blocker = sqlite3.connect(self.path)
         blocker.execute("BEGIN IMMEDIATE")
         entered = threading.Event()
-        original = self.app.state.conversations.create
+        release = threading.Event()
+        original = store.create
 
         def create(*args):
             entered.set()
+            if not release.wait(5):
+                raise AssertionError("Blocked database worker was not released")
             return original(*args)
 
         pool = concurrent.futures.ThreadPoolExecutor(2)
         try:
-            with patch.object(self.app.state.conversations, "create", create):
+            with patch.object(store, "create", create):
                 pending = pool.submit(self.client.post, "/conversations", json={})
                 self.assertTrue(entered.wait(2))
                 health = pool.submit(self.client.get, "/health")
-                self.assertEqual(health.result(timeout=0.5).status_code, 200)
-                response = pending.result(timeout=6)
+                self.assertEqual(health.result(timeout=3).status_code, 200)
+                self.assertFalse(pending.done(), "Health must respond while storage is still blocked")
+                release.set()
+                response = pending.result(timeout=3)
                 self.assertEqual(response.status_code, 503)
                 self.assertIn("busy", response.json()["detail"].lower())
         finally:
+            release.set()
             blocker.rollback()
             blocker.close()
             pool.shutdown(wait=True)
+            with store.lock:
+                store.db.execute("PRAGMA busy_timeout=5000")
