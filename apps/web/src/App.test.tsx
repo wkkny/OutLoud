@@ -47,6 +47,166 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('voice-first UI', () => {
+  it('sends reviewed text to Gemma, renders the reply and clears only the sent draft', async () => {
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/chat')) {
+        const body = JSON.parse(String(init?.body))
+        return new Response([
+          { type: 'chat.started', request_id: body.request_id, model: 'gemma3:4b', context_tokens: 4096 },
+          { type: 'chat.delta', request_id: body.request_id, text: 'Hello from Gemma.' },
+          { type: 'chat.done', request_id: body.request_id, metrics: { output_tokens: 5, elapsed_seconds: 1 } },
+        ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+      }
+      return defaultFetch(url, init)
+    })
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Hello Gemma' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText('Hello from Gemma.')
+    expect(screen.getByText('Hello Gemma')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('')
+    const request = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/chat'))
+    expect(JSON.parse(String(request?.[1]?.body)).messages).toEqual([{ role: 'user', content: 'Hello Gemma' }])
+  })
+
+  it('keeps the draft and recording connection when Ollama cannot start', async () => {
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/chat')) {
+        const { request_id } = JSON.parse(String(init?.body))
+        return new Response(JSON.stringify({ type: 'chat.error', request_id, message: 'Cannot reach Ollama. Start it with: ollama serve' }) + '\n')
+      }
+      return defaultFetch(url, init)
+    })
+    render(<App />)
+    connect()
+    const owner = socket()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my question' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText(/Cannot reach Ollama/)
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my question')
+    expect(screen.getByRole('button', { name: 'Hold to record' })).toBeEnabled()
+    expect(owner.closed).toBe(false)
+  })
+
+  it('stops generation, keeps partial text and sends only completed turns next time', async () => {
+    let requests = 0
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/chat')) {
+        const { request_id } = JSON.parse(String(init?.body))
+        requests++
+        if (requests === 1) {
+          return new Response(new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode([
+              { type: 'chat.started', request_id }, { type: 'chat.delta', request_id, text: 'Partial reply' },
+            ].map((event) => JSON.stringify(event)).join('\n') + '\n'))
+          } }))
+        }
+        return new Response([
+          { type: 'chat.started', request_id }, { type: 'chat.delta', request_id, text: 'Finished reply' },
+          { type: 'chat.done', request_id, metrics: { elapsed_seconds: 1 } },
+        ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+      }
+      return defaultFetch(url, init)
+    })
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First question' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText('Partial reply')
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Next question' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Stop generation' }))
+    await screen.findByText('Stopped · partial reply')
+    expect(screen.getByRole('textbox')).toHaveValue('Next question')
+    expect(screen.getByText('Partial reply')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText('Finished reply')
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/chat'))
+    expect(JSON.parse(String(calls[1][1]?.body)).messages).toEqual([{ role: 'user', content: 'Next question' }])
+  })
+
+  it('preserves edits made while Ollama is starting', async () => {
+    let accept: (() => void) | undefined
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/chat')) {
+        const { request_id } = JSON.parse(String(init?.body))
+        return new Response(new ReadableStream({ start(controller) {
+          accept = () => {
+            controller.enqueue(new TextEncoder().encode([
+              { type: 'chat.started', request_id }, { type: 'chat.delta', request_id, text: 'Reply after loading' },
+              { type: 'chat.done', request_id, metrics: { elapsed_seconds: 1 } },
+            ].map((event) => JSON.stringify(event)).join('\n') + '\n'))
+            controller.close()
+          }
+        } }))
+      }
+      return defaultFetch(url, init)
+    })
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Sent text' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New edits while loading' } })
+    act(() => accept?.())
+    await screen.findByText('Reply after loading')
+    expect(screen.getByRole('textbox')).toHaveValue('New edits while loading')
+  })
+
+  it('decodes Unicode replies split across individual bytes and accepts a final line without newline', async () => {
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/chat')) {
+        const { request_id } = JSON.parse(String(init?.body))
+        const bytes = new TextEncoder().encode([
+          { type: 'chat.started', request_id },
+          { type: 'chat.delta', request_id, text: 'Hello 👋 — こんにちは' },
+          { type: 'chat.done', request_id, metrics: { elapsed_seconds: 0.1 } },
+        ].map((event) => JSON.stringify(event)).join('\n'))
+        return new Response(new ReadableStream({ start(controller) {
+          for (const byte of bytes) controller.enqueue(Uint8Array.of(byte))
+          controller.close()
+        } }))
+      }
+      return defaultFetch(url, init)
+    })
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Unicode question' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText('Hello 👋 — こんにちは')
+    await screen.findByText('0.1s')
+    expect(screen.queryByText('Chat could not finish')).not.toBeInTheDocument()
+  })
+
+  it('keeps interrupted replies visible but excludes them from the next request', async () => {
+    let calls = 0
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/chat')) {
+        const { request_id } = JSON.parse(String(init?.body))
+        calls++
+        const events = [
+          { type: 'chat.started', request_id },
+          { type: 'chat.delta', request_id, text: calls === 1 ? 'Interrupted text' : 'Complete text' },
+        ]
+        const encoded = events.map((event) => JSON.stringify(event))
+        if (calls > 1) encoded.push(JSON.stringify({ type: 'chat.done', request_id, metrics: { elapsed_seconds: 1 } }))
+        return new Response(encoded.join('\n') + '\n')
+      }
+      return defaultFetch(url, init)
+    })
+    render(<App />)
+    connect()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First message' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText('Failed · partial reply')
+    expect(screen.getByText('Interrupted text')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Use this text again' })).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Retry question' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByText('Complete text')
+    const requests = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/chat'))
+    expect(JSON.parse(String(requests[1][1]?.body)).messages).toEqual([{ role: 'user', content: 'Retry question' }])
+  })
+
   it('keeps the composer usable while disconnected and disables recording', async () => {
     render(<App />)
     act(() => socket().close())

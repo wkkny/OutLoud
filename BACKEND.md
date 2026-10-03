@@ -184,6 +184,17 @@ A finished or stopped native run loop exits capture rather than spinning without
 a keyboard source. Capture is not automatically retried. See the
 [root README](README.md#fnglobe-shortcut) for permissions.
 
+## Local chat
+
+`chat.py` streams Ollama `gemma3:4b` replies with a 4,096-token context and a
+1,024-token output budget. `POST /chat` uses the owner token and subscribed
+conversation; `POST /chat/cancel` cancels only the matching request. One active
+generation is permitted. Generation errors are safe NDJSON terminal events and do
+not change recording readiness. Owner revocation, HTTP disconnect, or shutdown
+cancels upstream generation. Chat output has its own bounded queue, separate from
+WebSocket dictation delivery. See [CHAT.md](CHAT.md) for the contract, setup,
+limits, and real-model measurement checklist.
+
 ## Transcript delivery and owner liveness
 
 `delivery.py` commits completed results by recording ID to
@@ -287,7 +298,7 @@ programs or users on the same machine. Do not expose the server to a network.
 
 Not implemented in this step:
 
-- Ollama chat and conversation persistence.
+- Conversation persistence, model switching, tools, or attachments.
 - Persistent browser drafts and automatic recovery of unfinished audio jobs.
 - Disk retention limits or chunked long-recording transcription.
 

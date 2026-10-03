@@ -11,12 +11,13 @@ import anyio
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .runtime import RecordingRuntime, RuntimeUnavailable
 from .capacity import CapacityUnavailable
+from .chat import Chat, ChatBusy, ChatRequest
 
 ALLOWED_ORIGINS = {
     "http://localhost:5173",
@@ -32,6 +33,10 @@ class PressRequest(BaseModel):
 
 class FnRequest(PressRequest):
     enabled: bool = Field(strict=True)
+
+
+class ChatCancelRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
 
 
 class Heartbeat(BaseModel):
@@ -212,7 +217,7 @@ def production_runtime(publish):
     )
 
 
-def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic):
+def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic, ollama_client_factory=None):
     runtime_factory = runtime_factory or production_runtime
     owner = None
     loop = None
@@ -237,10 +242,12 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         loop = asyncio.get_running_loop()
         runtime = runtime_factory(publish)
         app.state.runtime = runtime
+        app.state.chat = Chat(ollama_client_factory)
         runtime.start()
         try:
             yield
         finally:
+            await app.state.chat.close()
             await asyncio.to_thread(runtime.stop)
             loop = None
 
@@ -265,6 +272,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         connection.active = False
         if owner is connection:
             app.state.runtime.release_owner(connection.session_id)
+            app.state.chat.cancel(connection.session_id)
             owner = None
 
     def live_owner():
@@ -302,6 +310,23 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
     @app.get("/state")
     async def state():
         return state_snapshot()
+
+    @app.post("/chat")
+    async def chat(body: ChatRequest, session_id=Depends(require_owner)):
+        if owner.conversation_id is not None and owner.conversation_id != body.conversation_id:
+            raise HTTPException(status_code=403, detail="Chat must use the owner's conversation")
+        try:
+            generation = app.state.chat.start(session_id, body)
+        except ChatBusy as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return StreamingResponse(
+            app.state.chat.stream(generation), media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.post("/chat/cancel", status_code=202)
+    async def cancel_chat(body: ChatCancelRequest, session_id=Depends(require_owner)):
+        return {"accepted": True, "active": app.state.chat.cancel(session_id, body.request_id)}
 
     @app.post("/recording/press", status_code=202)
     async def press(body: PressRequest, session_id=Depends(require_owner)):

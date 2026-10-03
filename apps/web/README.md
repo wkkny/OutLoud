@@ -86,7 +86,13 @@ restart.
 
 ## Current limits
 
-Send is disabled until Ollama chat is added. Fn capture is off by default and
+Chat uses Ollama Gemma `gemma3:4b`; setup is documented in [CHAT.md](../../CHAT.md).
+Press Send explicitly after reviewing text. Responses stream as plain text; Stop
+generation keeps partial text without stopping recording. Failed/stopped turns
+are excluded from later context and can be copied back into the composer.
+Conversations and reply metrics disappear on reload. Ollama failures leave the
+recording session connected, and edits made while the model loads are preserved.
+Fn capture is off by default and
 resets on disconnect, reload, or backend restart. Drafts are kept only in memory
 and disappear on reload. The backend's delivery index is stored in SQLite and
 survives backend restart; replay reads small batches rather than holding the

@@ -277,6 +277,7 @@ export function useDictation() {
   }
 
   return {
+    sessionId: session.current,
     connection,
     snapshot,
     transcripts,

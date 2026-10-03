@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
@@ -939,6 +939,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "filelock" },
     { name = "fsspec" },
+    { name = "httpx2" },
     { name = "idna" },
     { name = "jinja2" },
     { name = "llvmlite" },
@@ -967,11 +968,6 @@ dependencies = [
     { name = "websockets" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "httpx2" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.15.1" },
@@ -981,6 +977,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.142.2" },
     { name = "filelock", specifier = "==4.0.9" },
     { name = "fsspec", specifier = "==2026.9.0" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "idna", specifier = "==3.20" },
     { name = "jinja2", specifier = "==3.1.6" },
     { name = "llvmlite", specifier = "==0.50.0" },
@@ -1010,7 +1007,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "httpx2", specifier = ">=2.13.1" }]
+dev = []
 
 [[package]]
 name = "psutil"

@@ -2,7 +2,8 @@
 
 A local, voice-first chat app for macOS. Python records the microphone and
 transcribes with Whisper; a React interface appends the transcript to an editable
-composer. Transcripts never auto-send. Ollama chat is planned, but not connected yet.
+composer. Transcripts never auto-send. Review your text, then send it to local
+Gemma `gemma3:4b` through Ollama for a streamed reply.
 
 ## Prerequisites
 
@@ -103,6 +104,21 @@ OUTLOUD_MAX_TRANSCRIPTIONS=5 bun run dev
 Already-accepted commands are rechecked by the recording worker before microphone
 startup; a rapid queued start may report a capacity rejection after HTTP 202.
 
+## Local Gemma chat
+
+Install/start Ollama and download the model:
+
+```bash
+brew install ollama
+ollama serve                    # separate terminal, unless Ollama is already running
+ollama pull gemma3:4b           # another terminal
+```
+
+Press **Send** after reviewing the composer. **Stop generation** preserves partial
+text and does not stop recording. Chat uses a 4,096-token context and up to 1,024
+output tokens. Missing Ollama/model errors leave dictation available. Conversations
+are page-memory only. See [chat setup, behavior, and measurements](CHAT.md).
+
 ## Commands
 
 Run these from the repository root:
@@ -181,8 +197,7 @@ Audio is retained when transcription fails. Recordings, dependencies, generated
 web output, and Turbo caches are excluded from Git. Whisper's model cache lives
 outside the repository.
 
-Send is disabled until chat is connected. Drafts and transcript deduplication
-are held in page memory. Transcription capacity is bounded; delivery results and
+Chat messages, drafts, and transcript deduplication are held in page memory. Transcription capacity is bounded; delivery results and
 acknowledgement markers use disk storage with bounded replay batches, not an
 in-memory backlog. Disk usage is not capped or automatically pruned. Queued audio
 jobs are not automatically resumed after backend restart, although their files

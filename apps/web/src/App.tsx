@@ -7,11 +7,17 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
+import { useChat } from '@/hooks/use-chat'
 
 export default function App() {
-  const { connection, snapshot, transcripts, acknowledgeTranscript, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, setFnEnabled, reconnect, dismissError } = useDictation()
+  const { sessionId, connection, snapshot, transcripts, acknowledgeTranscript, error, pastErrors, dismissPastError, pendingCommands, safety, command, handsFree, setFnEnabled, reconnect, dismissError } = useDictation()
   const [composer, setComposer] = useState<{ text: string; appliedIds: string[] }>({ text: '', appliedIds: [] })
   const draft = composer.text
+  const chat = useChat(sessionId)
+  const send = () => void chat.send(draft, () => {
+    // Do not erase edits or new dictation that arrived while Ollama was loading.
+    setComposer((previous) => previous.text === draft ? { ...previous, text: '' } : previous)
+  })
   const consumed = useRef(0)
   const press = useCallback(() => command('press'), [command])
   const release = useCallback(() => command('release'), [command])
@@ -61,8 +67,8 @@ export default function App() {
 
       <main className="mx-auto flex max-w-3xl flex-col gap-6 px-5 py-10 sm:px-8 sm:py-14">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Dictation</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Speak, then review and edit your text.</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Chat</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Speak or type, review your message, then send it to local Gemma.</p>
         </div>
 
         {!connected && (
@@ -116,6 +122,14 @@ export default function App() {
           </Alert>
         ))}
 
+        {chat.error && (
+          <Alert variant="destructive" className="relative pr-12">
+            <AlertTitle>Chat could not finish</AlertTitle>
+            <AlertDescription>{chat.error}</AlertDescription>
+            <Button variant="ghost" size="icon-sm" className="absolute right-2 top-2" aria-label="Dismiss chat error" onClick={chat.dismissError}><X /></Button>
+          </Alert>
+        )}
+
         <Card className="shadow-none">
           <CardContent className="flex flex-col gap-6 pt-6">
             <div className="flex items-center justify-between gap-3 text-sm" role="status" aria-live="polite">
@@ -167,14 +181,34 @@ export default function App() {
               />
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-muted-foreground">Transcripts append here. Nothing sends automatically.</span>
-                <Button disabled aria-label="Send message — chat is not connected yet" title="Chat is not connected yet"><ArrowUp /> Send</Button>
+                {chat.busy
+                  ? <Button variant="outline" onClick={() => void chat.stop()} aria-label="Stop generation">Stop generation</Button>
+                  : <Button disabled={!connected || safety !== 'none' || !draft.trim()} onClick={send} aria-label="Send message"><ArrowUp /> Send</Button>}
               </div>
             </div>
+            {chat.messages.length > 0 && (
+              <ol aria-label="Conversation" className="flex flex-col gap-5 border-t pt-5">
+                {chat.messages.map((message) => (
+                  <li key={message.id} className="text-sm leading-relaxed">
+                    <p className="mb-1 font-medium">{message.role === 'user' ? 'You' : 'Gemma'}</p>
+                    <p className="whitespace-pre-wrap break-words">{message.content || (message.status === 'streaming' ? 'Thinking…' : 'No reply received.')}</p>
+                    {message.role === 'assistant' && message.status !== 'complete' && <p className="mt-1 text-xs text-muted-foreground">
+                      {message.status === 'streaming' ? 'Generating…' : message.status === 'cancelled' ? 'Stopped · partial reply' : 'Failed · partial reply'}
+                    </p>}
+                    {message.role === 'assistant' && message.metrics && <p className="mt-1 text-xs text-muted-foreground">
+                      {message.metrics.elapsed_seconds.toFixed(1)}s{message.metrics.output_tokens !== undefined && ` · ${message.metrics.output_tokens} output tokens`}
+                    </p>}
+                    {message.role === 'user' && (message.status === 'failed' || message.status === 'cancelled') && <Button variant="ghost" size="sm" className="mt-1" onClick={() => setComposer((previous) => ({ ...previous, text: [previous.text, message.content].filter(Boolean).join('\n') }))}>Use this text again</Button>}
+                  </li>
+                ))}
+              </ol>
+            )}
           </CardContent>
         </Card>
         <footer className="flex flex-col gap-1 text-xs leading-relaxed text-muted-foreground">
           <p>Audio and transcripts stay on this Mac. Transcription uses Whisper base.</p>
-          <p>Local Gemma chat is not connected yet. Fn capture is off by default and resets on reconnect.</p>
+          <p>Chat uses local Gemma gemma3:4b via Ollama · 4,096-token context. Conversations last for this page only.</p>
+          <p>Fn capture is off by default and resets on reconnect.</p>
         </footer>
       </main>
     </div>
