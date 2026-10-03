@@ -180,6 +180,7 @@ export class DictationSession {
       if (response.status === 429) { this.events.errorChanged('Transcription capacity is full. Wait before recording again.'); return false }
       if (response.status === 404) { this.events.errorChanged('This conversation was deleted. Select another conversation.'); return false }
       if (!response.ok) throw new Error(`Recording command failed (${response.status}).`)
+      this.events.errorChanged(null)
       return true
     } catch (failure) {
       if (this.sessionId === token) await this.lost(failure instanceof Error ? failure.message : 'Recording command failed.')

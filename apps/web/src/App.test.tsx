@@ -1,10 +1,101 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { backendFixture, FakeSocket, initialState } from '@/test/backend-fixture'
 
 let backend: ReturnType<typeof backendFixture>
 beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); backend = backendFixture() })
+it('shows the app name only in the sidebar and the selected conversation title in the main area', async () => {
+  backend.conversations.clear()
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  expect(screen.getAllByText('OutLoud')).toHaveLength(1)
+  expect(within(screen.getByRole('main')).queryByText('OutLoud')).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await waitFor(() => expect(within(screen.getByRole('main')).getByText('New conversation')).toBeVisible())
+  expect(screen.getByRole('button', { name: 'Rename conversation' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Delete conversation' })).toBeEnabled()
+})
+
+it('keeps sidebar navigation without storage explanations or a pretend workspace footer', async () => {
+  await open()
+  expect(screen.queryByText('Conversations are saved on this Mac and shared across tabs. This tab remembers its selected chat.')).not.toBeInTheDocument()
+  expect(screen.queryByText('Local workspace')).not.toBeInTheDocument()
+  expect(screen.queryByText('Private on this Mac')).not.toBeInTheDocument()
+  expect(screen.getByRole('navigation', { name: 'Conversations' })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Select First chat' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'New chat' })).toBeEnabled()
+})
+
+it('keeps routine composer copy quiet but shows unsaved changes until the save completes', async () => {
+  await open()
+  expect(screen.queryByText('Your draft is saved locally')).not.toBeInTheDocument()
+  expect(screen.queryByText('Audio and conversations stay on this Mac')).not.toBeInTheDocument()
+  expect(screen.queryByText('Whisper transcription · Gemma chat runs locally')).not.toBeInTheDocument()
+  expect(screen.getByText('⌘ / Ctrl')).toBeVisible()
+  expect(screen.getByText('Enter')).toBeVisible()
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  expect(composer).not.toHaveAccessibleDescription()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | undefined
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/conversations/chat-1') && init?.method === 'PATCH') return new Promise((resolve) => { release = () => resolve(response) })
+    return response
+  })
+  fireEvent.change(composer, { target: { value: 'My reviewed words' } })
+  expect(screen.getByText('Unsaved changes kept in this tab')).toBeVisible()
+  expect(composer).toHaveAccessibleDescription('Unsaved changes kept in this tab')
+  await waitFor(() => expect(release).toBeDefined())
+  await act(async () => release!())
+  await waitFor(() => expect(screen.queryByText('Unsaved changes kept in this tab')).not.toBeInTheDocument())
+  expect(composer).toHaveValue('My reviewed words')
+  expect(composer).not.toHaveAccessibleDescription()
+  expect(screen.queryByText('Your draft is saved locally')).not.toBeInTheDocument()
+})
+
+it('puts a suggested prompt in the draft for review without sending or replacing existing words', async () => {
+  await open()
+  expect(screen.getByRole('button', { name: 'Make a plan' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  await waitFor(() => expect(composer).toHaveValue(''))
+  fireEvent.click(screen.getByRole('button', { name: 'Make a plan' }))
+  expect(composer).toHaveValue('Help me turn my ideas into a practical plan.')
+  expect(composer).toHaveFocus()
+  expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(0)
+  expect(screen.getByRole('button', { name: 'Brainstorm ideas' })).toBeDisabled()
+})
+
+it('keeps Enter as a newline and sends a reviewed draft only with Ctrl or Cmd+Enter', async () => {
+  await open()
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  fireEvent.keyDown(composer, { key: 'Enter' })
+  fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true, isComposing: true })
+  expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(0)
+  fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true })
+  await screen.findByText('Local reply')
+  expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(1)
+})
+
+it('renders assistant markdown while keeping user text literal and model HTML and images inert', async () => {
+  const saved = backend.conversations.get('chat-1')!
+  saved.messages = [
+    { id: 'user-markdown', role: 'user', content: '**My words**', status: 'complete', metrics: null, created_at: saved.created_at },
+    { id: 'assistant-markdown', role: 'assistant', content: '## A plan\n\n**First step**\n\n- Review\n- Send\n\n```js\nconst value = 1\n```\n\n| Task | State |\n| --- | --- |\n| Review | Ready |\n\n<script>alert(1)</script>\n\n![tracking](https://example.com/tracker.png)\n\n[unsafe](javascript:alert%281%29)', status: 'complete', metrics: null, created_at: saved.created_at },
+  ]
+  const view = await open()
+  expect(screen.getByText('**My words**')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'A plan' })).toBeInTheDocument()
+  expect(screen.getByText('First step').tagName).toBe('STRONG')
+  expect(screen.getByRole('table')).toBeInTheDocument()
+  expect(screen.getByText('const value = 1')).toBeInTheDocument()
+  expect(view.container.querySelector('script')).toBeNull()
+  expect(view.container.querySelector('img')).toBeNull()
+  expect(screen.getByText('unsafe').getAttribute('href')).not.toMatch(/^javascript:/)
+})
+
 async function open() {
   const view = render(<App />)
   act(() => backend.socket().ready())
@@ -12,13 +103,130 @@ async function open() {
   return view
 }
 
+it('lets the user compose before a conversation exists and creates one when sending', async () => {
+  backend.conversations.clear()
+  render(<App />)
+  act(() => backend.socket().ready())
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  expect(composer).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'New chat' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Start recording' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+  await screen.findByText('Your conversations will appear here.')
+  expect(screen.queryByText('Your first message starts a new chat. Conversations are saved locally.')).not.toBeInTheDocument()
+  expect(screen.queryByText('A new chat starts when you send')).not.toBeInTheDocument()
+  expect(backend.requests.filter((request) => request.path === '/conversations' && request.method === 'POST')).toHaveLength(0)
+  fireEvent.change(composer, { target: { value: 'Start a conversation' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Local reply')
+  expect(backend.requests.filter((request) => request.path === '/conversations' && request.method === 'POST')).toHaveLength(1)
+  expect(backend.requests.find((request) => request.path === '/chat')?.body).toMatchObject({
+    conversation_id: expect.any(String),
+    messages: [{ role: 'user', content: 'Start a conversation' }],
+  })
+})
+
+it.each([429, 503])('retries a refused first send in the same selected conversation after a %s response', async (status) => {
+  backend.conversations.clear()
+  backend.setChatStatus(status)
+  render(<App />)
+  act(() => backend.socket().ready())
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Keep my first message' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByRole('dialog', { name: "Couldn't get a reply" })
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Keep my first message')
+  expect(screen.getByRole('button', { name: 'Select New conversation' })).toHaveAttribute('aria-current', 'page')
+  backend.setChatStatus(200)
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Local reply')
+  expect(backend.requests.filter((request) => request.path === '/conversations' && request.method === 'POST')).toHaveLength(1)
+  expect(backend.requests.filter((request) => request.path === '/chat').map((request) => request.body.conversation_id)).toEqual(['chat-2', 'chat-2'])
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+})
+
+it.each(['New chat', 'Send message', 'Start recording'])('keeps text typed while %s creates a conversation from the empty composer', async (action) => {
+  backend.conversations.clear()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: () => void = () => {}
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/conversations') && init?.method === 'POST') {
+      return new Promise((resolve) => { release = () => resolve(response) })
+    }
+    return response
+  })
+  render(<App />)
+  act(() => backend.socket().ready())
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Initial words' } })
+  fireEvent.click(screen.getByRole('button', { name: action }))
+  await waitFor(() => expect(backend.conversations.has('chat-2')).toBe(true))
+  expect(screen.getByRole('button', { name: 'New chat' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Latest words while creating' } })
+  await act(async () => release())
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Latest words while creating')
+  expect(screen.getByRole('button', { name: 'Select New conversation' })).toHaveAttribute('aria-current', 'page')
+  await waitFor(() => expect(backend.conversations.get('chat-2')?.draft).toBe('Latest words while creating'))
+  if (action === 'Start recording') {
+    await waitFor(() => expect(backend.requests).toContainEqual({ path: '/recording/start', method: 'POST', body: { conversation_id: 'chat-2' } }))
+  }
+  if (action === 'Send message') expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(0)
+})
+
+it('scopes a pre-selection draft to New chat even when the initial library resumes an existing conversation', async () => {
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  const releaseList: (() => void)[] = []
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/conversations') && !init?.method) return new Promise((resolve) => { releaseList.push(() => resolve(response)) })
+    return response
+  })
+  render(<App />)
+  act(() => backend.socket().ready())
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Pre-selection words' } })
+  await waitFor(() => expect(releaseList).toHaveLength(2))
+  await act(async () => { for (const release of releaseList) release() })
+  await screen.findByRole('button', { name: 'Select First chat' })
+  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  await screen.findByRole('button', { name: 'Select New conversation' })
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Pre-selection words')
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  fireEvent.click(screen.getByRole('button', { name: 'Select New conversation' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Pre-selection words')
+})
+
+it('waits for an existing conversation draft to load before editing it', async () => {
+  backend.conversations.set('loading-chat', { ...backend.conversations.get('chat-1')!, id: 'loading-chat', title: 'Loading chat', draft: 'Other saved words', messages: [] })
+  await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | undefined
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/conversations/loading-chat')) return new Promise((resolve) => { release = () => resolve(response) })
+    return response
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Select Loading chat' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toBeDisabled()
+  await waitFor(() => expect(release).toBeDefined())
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toBeEnabled()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  await act(async () => release!())
+  fireEvent.click(screen.getByRole('button', { name: 'Select Loading chat' }))
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toBeEnabled()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Other saved words')
+})
+
 it('creates, selects, renames, deletes and restores durable conversations independently of the socket', async () => {
   const view = await open()
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
-  fireEvent.change(screen.getByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Ideas' } })
   fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Ideas' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
   await screen.findByRole('button', { name: 'Select Ideas' })
   fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words'))
@@ -102,7 +310,7 @@ it('sends only the latest user message with backend identity, displays the reply
   expect(backend.conversations.get('chat-1')?.draft).toBe('')
 })
 
-it.each([[429, 'Generation capacity is busy'], [409, 'This conversation is already generating'], [503, 'Conversation storage is busy'], [403, 'The chat session expired'], [404, 'This conversation was deleted']])('keeps the draft and reports a %s refusal without retrying the model', async (status, message) => {
+it.each([[429, 'OutLoud is busy answering another chat'], [409, 'A reply is already in progress in this chat'], [503, 'Please try sending again in a moment'], [403, 'Please reconnect before sending'], [404, 'This chat was deleted']])('keeps the draft and reports a %s refusal without retrying the model', async (status, message) => {
   await open()
   backend.setChatStatus(Number(status))
   fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
@@ -237,13 +445,13 @@ it('retains unsaved draft recovery through reload after a storage failure and re
   backend.fetchMock.mockImplementation(async (url, init) => init?.method === 'PATCH' && storeBusy
     ? Response.json({ detail: 'Store busy' }, { status: 503 }) : baseFetch(url, init))
   fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Unsaved offline recovery' } })
-  await screen.findByRole('button', { name: 'Retry saving draft' })
+  await screen.findByRole('button', { name: 'Try saving again' })
   view.unmount()
   await open()
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Unsaved offline recovery')
-  await screen.findByRole('button', { name: 'Retry saving draft' })
+  await screen.findByRole('button', { name: 'Try saving again' })
   storeBusy = false
-  fireEvent.click(screen.getByRole('button', { name: 'Retry saving draft' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Try saving again' }))
   await waitFor(() => expect(backend.conversations.get('chat-1')?.draft).toBe('Unsaved offline recovery'))
 })
 
@@ -318,7 +526,7 @@ it('preserves a local draft when another tab deletes its selected conversation',
   fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Recover after deletion' } })
   backend.conversations.delete('chat-1')
   act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
-  await screen.findByText('Recovered unsaved drafts from unavailable conversations')
+  fireEvent.click(await screen.findByRole('button', { name: 'Recovered unsaved drafts from unavailable conversations' }))
   expect(screen.getByText('Recover after deletion')).toBeInTheDocument()
   expect(backend.socket().closed).toBe(false)
 })
@@ -523,4 +731,86 @@ it('preserves a failed partial reply when a delayed draft clear returns stale st
   act(() => backend.socket().emit({ type: 'conversation.updated', conversation_id: 'chat-1' }))
   await screen.findByText('Full authoritative answer')
   expect(screen.queryByText('Partial answer')).not.toBeInTheDocument()
+})
+
+it('cancels rename and deletion without changing the saved conversation', async () => {
+  await open()
+  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  const title = await screen.findByRole('textbox', { name: 'Conversation title' })
+  await waitFor(() => expect(title).toHaveFocus())
+  fireEvent.change(title, { target: { value: 'Discard this name' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  expect(await screen.findByRole('textbox', { name: 'Conversation title' })).toHaveValue('First chat')
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  expect(await screen.findByRole('alertdialog')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Keep conversation' }))
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+  expect(backend.requests.filter((request) => request.method === 'PATCH' || request.method === 'DELETE')).toHaveLength(0)
+  expect(backend.conversations.get('chat-1')?.title).toBe('First chat')
+})
+
+it('keeps a failed deletion open for review and allows retry', async () => {
+  await open()
+  backend.fetchMock.mockImplementationOnce(async () => Response.json({ detail: 'Conversation storage is busy' }, { status: 503 }))
+  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
+  await screen.findByText('Conversation storage is busy')
+  expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+  expect(backend.conversations.has('chat-1')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }))
+  await waitFor(() => expect(backend.conversations.has('chat-1')).toBe(false))
+})
+
+it('returns keyboard focus to the rename action after a successful title change', async () => {
+  await open()
+  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Reviewed name' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+  await screen.findByRole('button', { name: 'Select Reviewed name' })
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename conversation' })).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Rename conversation' })).toHaveFocus())
+})
+
+it('returns keyboard focus to a surviving header control after deleting the last conversation', async () => {
+  await open()
+  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Toggle Sidebar' })).toHaveFocus())
+  expect(backend.conversations.size).toBe(0)
+})
+
+it('hides collapsed desktop navigation from accessibility and restores it on expansion', async () => {
+  await open()
+  const toggle = screen.getByRole('button', { name: 'Toggle Sidebar' })
+  fireEvent.click(toggle)
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(screen.queryByRole('navigation', { name: 'Conversations' })).not.toBeInTheDocument()
+  fireEvent.click(toggle)
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByRole('navigation', { name: 'Conversations' })).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+})
+
+it('selects a conversation from the mobile drawer and closes it without losing the draft', async () => {
+  vi.mocked(window.matchMedia).mockImplementation((query) => ({
+    matches: true, media: query, onchange: null,
+    addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+  }))
+  render(<App />)
+  act(() => backend.socket().ready())
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words'))
+  expect(screen.queryByRole('navigation', { name: 'Conversations' })).not.toBeInTheDocument()
+  const toggle = screen.getByRole('button', { name: 'Toggle Sidebar' })
+  fireEvent.click(toggle)
+  await screen.findByRole('dialog', { name: 'Sidebar' })
+  fireEvent.click(screen.getByRole('button', { name: 'Select First chat' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  await waitFor(() => expect(toggle).toHaveFocus())
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+  expect(backend.socket().closed).toBe(false)
 })
