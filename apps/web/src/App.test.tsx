@@ -126,6 +126,55 @@ it('lets the user compose before a conversation exists and creates one when send
   })
 })
 
+it('recovers the first-chat draft and its unsaved warning after a reload', async () => {
+  backend.conversations.clear()
+  const view = render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Keep these first-chat words' } })
+  view.unmount()
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  expect(composer).toHaveValue('Keep these first-chat words')
+  expect(composer).toHaveAccessibleDescription('Unsaved changes kept in this tab')
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Local reply')
+  await waitFor(() => expect(composer).toHaveValue(''))
+  expect(within(screen.getByRole('article', { name: 'You' })).getByText('Keep these first-chat words')).toBeVisible()
+})
+
+it('keeps recovered first-chat edits when an earlier creation finishes after unmount', async () => {
+  backend.conversations.clear()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  let release: (() => void) | undefined
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if (String(url).endsWith('/conversations') && init?.method === 'POST') {
+      return new Promise((resolve) => { release = () => { void baseFetch(url, init).then(resolve) } })
+    }
+    return baseFetch(url, init)
+  })
+  const view = render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Original first-chat words' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await waitFor(() => expect(release).toBeDefined())
+  view.unmount()
+  const recovered = render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Newer recovered words' } })
+  await act(async () => release!())
+  recovered.unmount()
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByRole('button', { name: 'Select New conversation' })
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Newer recovered words')
+  expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(0)
+})
+
 it('shows the first message immediately while its conversation is still being created', async () => {
   backend.conversations.clear()
   const baseFetch = backend.fetchMock.getMockImplementation()!
@@ -187,6 +236,32 @@ it('retries the failed bubble without duplicating it or replacing newer composer
   expect(attempts[1]?.body.request_id).toBe(attempts[0]?.body.request_id)
 })
 
+it('recovers a failed bubble after reload and retries its original request while preserving newer words', async () => {
+  const view = await open()
+  backend.setChatStatus(429)
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Not sent')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Newer words for later' } })
+  view.unmount()
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Not sent')
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  expect(composer).toHaveValue('Newer words for later')
+  const retry = screen.getByRole('button', { name: 'Retry' })
+  await waitFor(() => expect(retry).toBeEnabled())
+  backend.setChatStatus(200)
+  fireEvent.click(retry)
+  await screen.findByText('Local reply')
+  expect(composer).toHaveValue('Newer words for later')
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  const attempts = backend.requests.filter((request) => request.path === '/chat')
+  expect(attempts.map((request) => request.body.messages)).toEqual([
+    [{ role: 'user', content: 'Saved words' }], [{ role: 'user', content: 'Saved words' }],
+  ])
+  expect(attempts[1]?.body.request_id).toBe(attempts[0]?.body.request_id)
+})
+
 it('reconciles a saved message after a lost acceptance without retaining a duplicate retry bubble', async () => {
   await open()
   const baseFetch = backend.fetchMock.getMockImplementation()!
@@ -202,6 +277,27 @@ it('reconciles a saved message after a lost acceptance without retaining a dupli
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument())
   expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+})
+
+it('reconciles a lost confirmation after a reload without allowing a duplicate send', async () => {
+  const view = await open()
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    const response = await baseFetch(url, init)
+    if (String(url).endsWith('/chat')) throw new TypeError('Connection lost after acceptance')
+    return response
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Not sent')
+  view.unmount()
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Local reply')
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
+  expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  expect(screen.getAllByRole('article', { name: 'You' })).toHaveLength(1)
+  expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(1)
 })
 
 it('retries a lost confirmation using the original request and displays the saved reply once', async () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
 import { HTTP_URL } from '@/lib/backend-url'
 import type { ConversationDetail, ConversationLibrary, SavedMessage } from '@/lib/conversations'
+import { readPendingSends, writePendingSends, type PendingSend } from '@/lib/chat-recovery'
 
 const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat.started'), request_id: z.string() }),
@@ -12,7 +13,6 @@ const eventSchema = z.discriminatedUnion('type', [
 ])
 
 type Status = SavedMessage['status']
-export type PendingSend = { id: string; conversationId: string | null; text: string; createdAt: string; delivery: 'sending' | 'failed' }
 export type ChatViewMessage = SavedMessage & { delivery?: PendingSend['delivery']; pendingSend?: PendingSend }
 type Run = { id: string; conversationId: string; sessionId: string; controller: AbortController; reader?: ReadableStreamDefaultReader<Uint8Array>; stopped: boolean }
 
@@ -21,8 +21,8 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
   const [live, setLive] = useState<Record<string, SavedMessage[]>>({})
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [pending, setPending] = useState<PendingSend[]>([])
-  const pendingRef = useRef<PendingSend[]>([])
+  const [pending, setPending] = useState(readPendingSends)
+  const pendingRef = useRef(pending)
   const history = useRef<Record<string, SavedMessage[]>>({})
   const runs = useRef(new Map<string, Run>())
   const mounted = useRef(true)
@@ -32,7 +32,10 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
 
   const changePending = useCallback((transform: (previous: PendingSend[]) => PendingSend[]) => {
     pendingRef.current = transform(pendingRef.current)
-    if (mounted.current) setPending(pendingRef.current)
+    if (mounted.current) {
+      writePendingSends(pendingRef.current)
+      setPending(pendingRef.current)
+    }
   }, [])
   const prepare = (conversationId: string | null, text: string, retry?: PendingSend) => {
     const previousAttempt = retry ?? pendingRef.current.findLast((item) => item.conversationId === conversationId && item.text === text && item.delivery === 'failed')

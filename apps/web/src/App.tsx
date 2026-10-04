@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Toaster, createToastManager } from '@/components/ui/toast'
 import { ArrowUp, ChevronDown, RefreshCw, Square } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -11,7 +11,8 @@ import { RecordingControl } from '@/components/recording-control'
 import { useDictation } from '@/hooks/use-dictation'
 import { useNotifications } from '@/hooks/use-notifications'
 import { useConversations } from '@/hooks/use-conversations'
-import { useChat, type PendingSend } from '@/hooks/use-chat'
+import { useChat } from '@/hooks/use-chat'
+import { readUnscopedDraft, writeUnscopedDraft, type PendingSend } from '@/lib/chat-recovery'
 import { AppSidebar } from '@/components/app-sidebar'
 import { ConversationActions } from '@/components/conversation-actions'
 import { Badge } from '@/components/ui/badge'
@@ -31,6 +32,8 @@ export default function App() {
 }
 
 function ChatApp() {
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const conversations = useConversations()
   const dictation = useDictation(conversations.library)
   const { library, selectedId, list, details, historyRevisions, drafts } = conversations
@@ -40,9 +43,10 @@ function ChatApp() {
   const [sending, setSending] = useState(false)
   const [creating, setCreating] = useState(false)
   const pendingCreation = useRef<Promise<string | null> | null>(null)
-  const [unscopedDraft, setUnscopedDraft] = useState('')
-  const latestUnscopedDraft = useRef('')
+  const [unscopedDraft, setUnscopedDraft] = useState(readUnscopedDraft)
+  const latestUnscopedDraft = useRef(unscopedDraft)
   const editUnscopedDraft = (text: string) => {
+    writeUnscopedDraft(text)
     latestUnscopedDraft.current = text
     setUnscopedDraft(text)
   }
@@ -52,7 +56,7 @@ function ChatApp() {
   const occupied = Boolean(dictation.snapshot?.recording && !recording)
   const micEnabled = connected && dictation.safety === 'none' && (recording || (!creating && Boolean(dictation.snapshot?.ready && dictation.snapshot.capacity.available > 0)))
   const composerText = draft ? [draft.text, unscopedDraft].filter(Boolean).join('\n') : unscopedDraft
-  const hasUnsavedDraft = Boolean(draft && draft.text !== draft.base)
+  const hasUnsavedDraft = Boolean(unscopedDraft || (draft && draft.text !== draft.base))
   const canSend = connected && Boolean(composerText.trim()) && (!selectedId || Boolean(draft)) && (!draft || draft.conflict === null) && !chat.busy && !sending && !creating
   const canRetry = connected && (!selectedId || Boolean(draft)) && (!draft || draft.conflict === null) && !chat.busy && !sending && !creating
   const recovered = Object.entries(drafts).filter(([id, item]) => !list.some((conversation) => conversation.id === id) && item.text !== item.base)
@@ -61,6 +65,7 @@ function ChatApp() {
     setCreating(true)
     const task = (async () => {
       const id = await library.create()
+      if (!mounted.current) return null
       if (id) {
         if (latestUnscopedDraft.current) library.edit(id, latestUnscopedDraft.current)
         editUnscopedDraft('')
@@ -85,7 +90,7 @@ function ChatApp() {
       const id = await ensureConversation()
       if (!id) return
       chat.attach(attempt.id, id)
-      if (!await library.save(id)) return
+      if (!await library.save(id) || !mounted.current) return
       // An append/conflict during saving must be reviewed before sending.
       if (!retry && library.getSnapshot().drafts[id]?.text !== text) return
       started = true
