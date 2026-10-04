@@ -288,9 +288,8 @@ class Chat:
                             if study_plan is not None:
                                 if packet.get('done_reason') == 'length':
                                     raise ChatFailure('Study feedback was incomplete. Retry with a shorter answer.')
-                                study_result = assessment_result(study_plan, reply)
+                                study_result = assessment_result({**study_plan, 'latest_answer': generation.request.messages[-1].content}, reply)
                                 reply = study_result['rendered']
-                                await generation.queue.put(generation.event('delta', text=reply))
                             metrics = {"elapsed_seconds": time.monotonic() - started, "first_token_seconds": first_token}
                             for source, target, divisor in (
                                 ("eval_count", "output_tokens", 1), ("prompt_eval_count", "input_tokens", 1),
@@ -327,7 +326,12 @@ class Chat:
                     callback = (lambda user_id: self.study.complete(study_plan, study_result, user_id)) if study_result is not None else None
                     if study_plan is not None and study_result is None:
                         reply = ''  # Never persist malformed JSON as user-visible feedback.
-                    await self.storage(self.store.finish_turn, generation.request.conversation_id, turn_id, reply, status, terminal.get("metrics"), callback)
+                    saved_result = await self.storage(self.store.finish_turn, generation.request.conversation_id, turn_id, reply, status, terminal.get("metrics"), callback)
+                    if study_result is not None and status == 'complete':
+                        if saved_result is None:
+                            terminal = generation.event('error', message='Study conversation was removed during feedback.')
+                        else:
+                            await generation.queue.put(generation.event('delta', text=saved_result['rendered']))
                     self.on_change(generation.request.conversation_id)
                 except asyncio.CancelledError:
                     # The drain completed its transaction before propagating this

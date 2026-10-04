@@ -427,7 +427,7 @@ it('waits for an existing conversation draft to load before editing it', async (
   let release: (() => void) | undefined
   backend.fetchMock.mockImplementation(async (url, init) => {
     const response = await baseFetch(url, init)
-    if (String(url).endsWith('/conversations/loading-chat')) return new Promise((resolve) => { release = () => resolve(response) })
+    if (new URL(String(url)).pathname === '/conversations/loading-chat') return new Promise((resolve) => { release = () => resolve(response) })
     return response
   })
   fireEvent.click(screen.getByRole('button', { name: 'Select Loading chat' }))

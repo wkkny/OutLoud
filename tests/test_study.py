@@ -346,3 +346,54 @@ class StudyTests(unittest.TestCase):
         session = self.client.get(f'/study/conversations/{conversation}').json()
         self.assertEqual(session['last_action'], 'practice')
         self.assertEqual(session['topic']['history'], [])
+
+    def test_reference_removed_during_feedback_keeps_chat_and_progress_provisional(self):
+        import asyncio
+        subject = self.create_subject()
+        source = self.reference(subject)
+        conversation = self.study_conversation(subject)
+        async def changed_reference(request):
+            await asyncio.to_thread(self.client.delete, f'/study/uploads/{source}')
+            return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct definition.', 'question': 'Apply 3NF.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
+        self.handler = changed_reference
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation, 'My independent definition.', 'source-race')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        saved = self.client.get(f'/conversations/{conversation}').json()['messages'][-1]['content']
+        self.assertIn('Provisional', saved)
+        self.assertNotIn('**Partial understanding**', response.text)
+        self.assertNotIn('References: DBMS notes', saved)
+        topic = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]
+        self.assertEqual(topic['judgment'], 'not_assessed')
+
+    def test_omitted_reference_context_cannot_establish_assessment(self):
+        subject = self.create_subject()
+        source = self.client.post(f"/study/subjects/{subject['id']}/references", json={'name': 'Long exam notes', 'text': '3NF: reference statement. ' + ('Additional approved material. ' * 100)}).json()['id']
+        conversation = self.study_conversation(subject)
+        async def supported(request):
+            self.requests.append(json.loads(request.content))
+            return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct.', 'question': 'Apply 3NF.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
+        self.handler = supported
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            self.send(socket, conversation, 'My independent answer.', 'omitted-context')
+        topic = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]
+        self.assertEqual(topic['judgment'], 'not_assessed')
+        self.assertTrue(topic['assessment']['provisional'])
+        saved = self.client.get(f'/conversations/{conversation}').json()['messages'][-1]['content']
+        self.assertIn('reference context is incomplete', saved)
+        self.assertTrue(json.loads(self.requests[0]['messages'][-1]['content'])['reference_context_incomplete'])
+
+    def test_unapproved_schema_in_feedback_is_not_presented_as_supported_assessment(self):
+        subject = self.create_subject()
+        source = self.reference(subject)
+        conversation = self.study_conversation(subject)
+        async def invented_feedback(request):
+            return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct. Given Books(BookID, AuthorID), BookID is the key. Is this 3NF?', 'question': 'Apply 3NF to your own example.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
+        self.handler = invented_feedback
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            self.send(socket, conversation, 'My independent definition.', 'invented-feedback')
+        saved = self.client.get(f'/conversations/{conversation}').json()['messages'][-1]['content']
+        self.assertNotIn('BookID', saved)
+        self.assertIn('Provisional', saved)
+        topic = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]
+        self.assertEqual(topic['judgment'], 'not_assessed')

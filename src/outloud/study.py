@@ -228,14 +228,15 @@ class StudyStore:
             topic, subject = session['topic'], session['subject']
             if not topic['active']:
                 raise ValueError('Topic was removed from the active syllabus. Choose an active topic.')
-            references, remaining = [], 4000
+            references, remaining, reference_context_incomplete = [], 4000, False
             for upload in self.applicable_references(topic['id'], subject['uploads']):
                 text = upload['text'][:min(2000, remaining)]
+                reference_context_incomplete |= len(text) < len(upload['text'])
                 if text:
                     references.append({'id': upload['id'], 'name': upload['name'] + ' pages ' + ','.join(map(str, upload['pages'])), 'text': text})
                     remaining -= len(text)
             prior = [item for item in self.valid_evidence(topic, topic['history'], subject['uploads']) if item['action'] == 'answer' and not item['hinted'] and not item['result']['provisional'] and set(item['result']['sources']).issubset({ref['id'] for ref in references})]
-            return {'conversation_id': conversation_id, 'topic_id': topic['id'], 'revision': topic['revision'], 'topic': topic['name'], 'coverage': topic['coverage'][:1000], 'exam_type': subject['exam_type'], 'level': subject['level'], 'action': action, 'question': session['question'], 'hinted': bool(session['hinted']), 'references': references, 'independent_count': len(prior), 'previous_evidence': list({evidence_id for item in prior[-2:] for evidence_id in [item['user_message_id'], *item['result'].get('evidence_ids', [])]}), 'previous_answers': [{'question': item['question'], 'answer': item['answer'][:800]} for item in prior[-2:]], 'topic_progress': [{'name': item['name'], 'judgment': item['judgment'], 'exam_importance': item['weight']} for item in subject['topics'] if item['active']][:10], 'subject_coverage': subject['coverage']}
+            return {'conversation_id': conversation_id, 'topic_id': topic['id'], 'revision': topic['revision'], 'topic': topic['name'], 'coverage': topic['coverage'][:1000], 'exam_type': subject['exam_type'], 'level': subject['level'], 'action': action, 'question': session['question'], 'hinted': bool(session['hinted']), 'references': references, 'reference_context_incomplete': reference_context_incomplete, 'independent_count': len(prior), 'previous_evidence': list({evidence_id for item in prior[-2:] for evidence_id in [item['user_message_id'], *item['result'].get('evidence_ids', [])]}), 'previous_answers': [{'question': item['question'], 'answer': item['answer'][:800]} for item in prior[-2:]], 'topic_progress': [{'name': item['name'], 'judgment': item['judgment'], 'exam_importance': item['weight']} for item in subject['topics'] if item['active']][:10], 'subject_coverage': subject['coverage']}
 
     def begin_attempt(self, plan):
         # Shares the accepted user turn's transaction, including interrupted turns.
@@ -251,10 +252,14 @@ class StudyStore:
         current_sources = {upload['id'] for upload in self.applicable_references(topic['id'], uploads)}
         valid_ids = {item['user_message_id'] for item in self.valid_evidence(topic, self.evidence(topic['id']), uploads)}
         if topic['revision'] != plan['revision'] or not topic['active'] or not set(result['sources']).issubset(current_sources) or not set(plan['previous_evidence']).issubset(valid_ids):
-            result = {**result, 'judgment': 'not_assessed', 'gaps': [], 'provisional': True}
+            rendered = '**Provisional guidance · study evidence changed; reassessment needed**\n\n' + result['feedback']
+            if result['question']:
+                rendered += '\n\n**Next question**\n\n' + result['question']
+            result = {**result, 'judgment': 'not_assessed', 'gaps': [], 'provisional': True, 'rendered': rendered}
         result = {**result, 'evidence_ids': [*plan['previous_evidence'], user_message_id]}
         self.db.execute('INSERT INTO study_evidence VALUES(?,?,?,?,?,?,?,?)', (user_message_id, plan['topic_id'], plan['revision'], now(), plan['question'], plan['action'], plan['hinted'], json.dumps(result)))
         self.db.execute('UPDATE study_sessions SET question=?,hinted=?,finished=? WHERE conversation_id=?', (result['question'] or plan['question'], int(plan['action'] == 'explain'), int(plan['action'] == 'finish'), plan['conversation_id']))
+        return result
 
     def delete_upload(self, upload_id):
         with self.lock, self.db:

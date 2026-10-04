@@ -29,3 +29,5 @@ Browser and Electron share this UI. Each backend keeps study records and uploads
 ## Validation
 
 The design and confirmed test seams are in [study-mode-design.md](study-mode-design.md). Automated study checks run with the normal `bun run check` command. The small real-model prototype is preserved on `prototype/study-validation` (`55e8f0a`), with raw outputs and a printed syllabus fixture.
+
+Assessment uses a bounded reference context: up to 2,000 characters per applicable reference and 4,000 total. When approved material exceeds that context, feedback stays provisional because omitted text could contain a conflict. Review concise excerpts and map them to their topics before established assessment.

@@ -180,16 +180,18 @@ class ConversationStore:
 
     def finish_turn(self, conversation_id, turn_id, content, status, metrics=None, on_complete=None):
         with self.lock, self.db:
+            result = on_complete(f'{turn_id}-user') if status == 'complete' and on_complete is not None else None
+            if result is not None:
+                content = result['rendered']
             self.db.execute("UPDATE messages SET status=? WHERE id=?", (status, f"{turn_id}-user"))
             self.db.execute(
                 "UPDATE messages SET content=?, status=?, metrics=? WHERE id=?",
                 (content, status, json.dumps(metrics) if metrics is not None else None, f"{turn_id}-assistant"),
             )
-            if status == 'complete' and on_complete is not None:
-                on_complete(f'{turn_id}-user')
             # If the conversation was deleted mid-generation, updates are no-ops;
             # an in-flight reply must never resurrect deleted content.
             self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (_now(), conversation_id))
+            return result
 
     def close(self):
         with self.lock:

@@ -17,7 +17,7 @@ class ConversationWriteCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.app = create_app(lambda publish: RecordingRuntime(publish, FakeRecorder(Path(self.directory.name))), conversations_path=Path(self.directory.name) / "conversations.sqlite3")
         self.lifespan = self.app.router.lifespan_context(self.app)
         await self.lifespan.__aenter__()
-        self.endpoints = {route.name: route.endpoint for route in self.app.routes}
+        self.endpoints = {route.name: route.endpoint for route in self.app.routes if hasattr(route, "endpoint")}
         self.incoming = asyncio.Queue()
         self.outgoing = asyncio.Queue()
         await self.incoming.put({"type": "websocket.connect"})
