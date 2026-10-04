@@ -1,12 +1,12 @@
 # Study release UI prototype
 
-Status: learner selected B (Revision queue), with an expanded desktop sidebar, Settings at the bottom, no readiness indicators and no decorative headings. This revision is ready for visual review. Prototype branch: `prototype/study-release`, based on merged main `a43edd2`.
+Status: the learner selected B (Revision queue), then confirmed subject folders, independent nested conversations, multiple selectable topics, and a shared Study/Chat workspace. This revised prototype is ready for visual review. It is not production integration. Branch: `prototype/study-release`, based on merged main `a43edd2`.
 
 ## Question
 
-Which information hierarchy makes it easiest to choose the next topic, resume a saved study conversation, review answer-specific feedback, and finish a study session without confusing assessment coverage with demonstrated understanding?
+Can a minimal subject-first workspace make it easy to resume or start a conversation, choose its topics, and switch between Study and Chat without losing drafts or confusing assisted attempts with independent evidence?
 
-The prototype is mounted on the existing app route behind a development-only query parameter. It uses the existing React/shadcn components and bundled Geist font. It does not contact the backend, models or microphone, and all mutations are in memory. This isolates the UI decision from setup and assessment correctness. Production UI and backend behavior remain unchanged.
+The prototype uses the existing React/shadcn components and bundled Geist font, mounted behind a development-only query parameter. It never contacts the backend, models, microphone or persistent storage. Reloading resets all demo changes. The production app's behavior is unchanged.
 
 ## Run
 
@@ -15,52 +15,63 @@ bun install --frozen-lockfile
 bun run prototype:study
 ```
 
-Open `http://127.0.0.1:5175/?prototype=study-release&variant=B`. The prototype needs no Python backend, model or microphone permission. Port 5175 must be free.
+Open `http://127.0.0.1:5175/?prototype=study-release&variant=B`. Port 5175 must be free; Python, models and microphone permission are unnecessary.
 
-- **A — Study dashboard:** persistent app sidebar, subject tabs, separate assessment/understanding counts, a prominent resume card, materials card, and revision list.
-- **B — Revision queue (selected):** expanded Study/Chat and subject navigation, Settings pinned at the sidebar bottom, one next-topic action, and an ordered topic list. The subject name is the page heading. No duplicate subject tabs, readiness badges, decorative eyebrows, motivational copy or study-step strip.
-- **C — Subject notebook:** persistent subject/syllabus index, a subject notebook with evidence history, and a study workspace with the reference excerpt alongside the conversation.
+The floating demo bar changes `?variant=A|B|C`, scenarios and feedback fixtures. Arrow keys also switch variants outside inputs, buttons and dialogs. Switching layouts preserves in-memory conversation state.
 
-The bottom switcher updates `?variant=A|B|C`; left/right arrow keys also cycle layouts outside editable controls. Switching layouts preserves the current demo state; reloading resets it.
+- **A — Study dashboard:** subject overview with a next-topic card and conversation cards beside the revision list.
+- **B — Revision queue (selected):** subject overview, one next-topic action and an ordered topic list, with expandable subject folders and nested conversations in the sidebar.
+- **C — Subject notebook:** syllabus-first overview and a reference panel beside the conversation.
 
-## Walkthrough
-
-1. Compare home screens A, B and C. Distinguish topics assessed from understanding demonstrated.
-2. Resume Normalization. Type an answer, press Enter, and inspect the clearly simulated feedback and follow-up question. Shift+Enter inserts a newline; IME composition does not send.
-3. Click Dictate, then Stop. The prototype inserts sample dictation without accessing a microphone. Review it before sending.
-4. Try Explain this, Practice this, Move on and Finish studying. Read the assisted-answer caveat and session summary. The prototype never awards new progress.
-5. Toggle Provisional and Feedback failed in the switcher. Observe that provisional guidance does not establish a gap and failed feedback preserves the reviewed answer with explicit retry.
-6. Open the evidence and material-review panels. Edit a reference: it becomes pending review until approved. Syllabus scope and reference support remain distinct.
-7. Select First launch. Models are missing, but create a subject and manually enter topics. New topics remain not assessed. Model-dependent study actions explain setup is needed.
-8. Open Settings at the bottom of the sidebar; consent to the simulated download, cancel/retry it, or choose Later. The simulation requires a separate verification action after download completion, rather than conflating download with readiness.
-9. Select Backend offline. Compose a draft in Chat; generation/recording stay blocked while typing remains possible.
-10. Inspect demo state. It includes layout, screen, subject/topic, readiness, draft, recording, feedback flags, and topic evidence counts.
-
-## Observed browser checks
-
-On 2026-10-04, the collaborative browser exercised:
-
-- A home → Resume → typed answer → Enter → visible reviewed answer and simulated feedback, with the composer cleared.
-- No backend/model HTTP requests in the prototype path.
-- Layout switching updates the URL through A, B and C.
-- Missing-model scenario → manual Computer Networks subject with Routing/TCP topics → subject created, 0/2 assessed, model-dependent topic actions blocked.
-- A and the refined B at 390 CSS-pixel width had no horizontal page overflow; B's Settings icon remained visible and clickable.
-- Refined B: expanded sidebar and bottom Settings control opened the model-settings dialog. Continue studying → typed answer → Enter preserved the answer, displayed feedback and cleared the composer. No decorative-eyebrow or global-readiness elements remained.
-- Missing models in refined B disabled dependent study actions, left New subject enabled, and showed setup guidance only beside the affected action.
-- Subject-selection layout regression: switching Operating Systems → DBMS changed its font weight from 400 to 550, wrapping the name and increasing row height from 38px to 56px. Browser bounding-box checks caught an 18px shift in subsequent rows. Removing the selected-only font weight leaves the color/background highlight and produces zero height/position changes for DBMS, Operating Systems and New subject at 1280px width. Retain this selection-stability check in production UI validation; the prototype has no permanent test suite.
-- Web TypeScript/build and lint pass. The production build omits the prototype import/chunks after the development-only gate is eliminated.
-- Existing web suite: 107 tests passed. No permanent prototype tests were added; these checks establish runnable exploration, not production behavior or usability approval.
-
-## Limitations and next decision
-
-This is not a production implementation, assessment-quality experiment, accessibility completion, real setup workflow, speech test or persistence test. Feedback, evidence dates, source text and model/download state are fixtures. Model-dependent readiness is simplified into scenarios; production needs separate capabilities and truthful phase/byte progress.
-
-The modal panels lack production dialog focus management and the prototype intentionally skips automated tests and robust recovery. Rewrite the chosen design against the actual API and agreed test seams; do not merge these variants or their switcher into main.
+The original layouts are preserved in `6968624`; the expanded/minimal B refinement in `da685e8`; and its selection-layout fix in `e029cac`.
 
 ## Selected direction
 
-The learner chose **B**, rather than the earlier A/C recommendation. Keep its next-topic action and revision queue, but use an expanded desktop sidebar with Settings at the bottom. Remove global readiness badges and decorative eyebrow headings. Each heading must identify actual content; supporting text should explain an action, evidence or a failure, not decorate the screen.
+- Subjects are the sidebar groups/folders. Conversation titles, not topic names, are nested beneath them. A subject holds the topic catalog, approved material and progress; sibling conversations do not share transcripts or drafts.
+- Study and Chat are modes of one conversation workspace with one composer. No separate mode destinations in the sidebar. Mode switches preserve the conversation, draft and saved question, and old turns keep their original mode and assessment topic.
+- Conversations can select one or several topics. Study asks one question about an explicit topic at a time, so evidence stays attributable. Topic changes cannot reinterpret an unsent answer; the demo blocks changing its question topic until that draft is sent or cleared.
+- Relevant help delivered in Chat makes the corresponding Study attempt assisted. Mode toggles alone do not. Retries/repeated answers keep their assistance; starting a fresh question after completing the assisted attempt can begin an independent attempt.
+- Settings stays at the sidebar bottom independently of conversation-list scrolling. Desktop navigation is expanded; narrow screens open the same folders in a drawer.
+- No global readiness indicators, decorative eyebrows, motivational slogans, duplicate subject tabs or static study-step strip. Headings name content; other text must explain an action, result, evidence or failure. Missing dependencies appear beside affected actions, with a route to Settings.
 
-The revision removes the duplicate subject tabs, top status bar, Local badge, ready indicators, motivational slogans and static study-step strip. Subject selection and creation live in the sidebar. Settings remains reachable when the subject list scrolls. Model checks still gate dependent actions internally; missing-model and connection problems appear beside the affected action, with a route to Settings. Minimal presentation must not discard provisional-feedback or independent-evidence distinctions.
+See [ADR 0003](adr/0003-subject-context-and-conversation-modes.md) and [the release draft](study-release-spec-draft.md). Rewrite against actual endpoints and approved test seams; do not promote throwaway code or ship the demo controls.
 
-The prototype disclaimer and floating demo controls remain separate from the proposed product UI. They must not ship. The original variants are preserved in commit `6968624`. Rewrite the chosen design against real APIs and approved test seams rather than promote throwaway code.
+## Walkthrough
+
+1. Expand/collapse DBMS. Open Normalization practice or Exam revision. Clicking a subject name returns to its overview without changing the folder's text metrics.
+2. Open Exam revision: Normalization and Transactions are already selected. Topics opens the subject's topic catalog; add Indexing, then Apply topics. Question topic chooses the current Study focus within that selection.
+3. Type an unsent draft. Switch to Chat and back to Study. The draft and original question remain; merely switching adds no assistance.
+4. Choose Explain normalization, or ask Chat to explain a selected topic. The demo appends a Chat explanation and marks help for that topic without sending unrelated composer text. Switch to Study and send an answer: it is labelled assisted and cannot establish independent understanding.
+5. Choose Practice this after the reviewed assisted attempt. A new question can begin an independent attempt. Choosing a new practice question before answering must not bypass pending assistance. No new progress is awarded in this demo.
+6. Leave different drafts in Normalization practice and Exam revision. Switch conversations: each keeps its own draft, mode and message history. Subject material and the topic catalog remain shared.
+7. Choose New conversation within DBMS. It inherits the subject context and available topics. Before the first send it is an in-memory pending draft, not another saved sidebar entry. The first reviewed send lists it under DBMS. Reopening New conversation resumes an existing pending draft rather than discarding it.
+8. Dictate, then Stop. Simulated text enters the current draft without a microphone. Mode/topic/conversation navigation is disabled during capture so the target cannot change. Send remains separate from recording.
+9. Finish studying. Study pauses with its draft intact; Chat is still available in the same conversation. Return to Study and Resume without creating a new conversation.
+10. Toggle Provisional or Feedback failed in the demo bar. Unsupported guidance does not claim established understanding. Failed Study feedback retains the answer and its original context, with explicit Retry feedback.
+11. Open Materials. Editing the shared reference makes it pending until approval. Assessment evidence lists Study attempts across the subject's conversations with their topic and assistance status; Chat turns are not assessment evidence.
+12. Select First launch. Create Computer Networks with Routing/TCP. Subject creation and organization remain available, while model-dependent actions are blocked locally. Open bottom Settings for simulated consent/download/cancel/retry/verification/Later.
+13. At a narrow width, open Subjects to reach folders, conversations and bottom Settings. Inspect demo state in the lab bar to see subjects, conversation scope, questions, assistance flags, original-mode turns and independent drafts.
+
+## Observed browser checks
+
+The collaborative browser exercised these paths on 2026-10-04:
+
+- Initial variants: home/resume/typed answer, no backend/model requests, URL switching, manual subject creation without models and a 390px overflow check.
+- Expanded B selection bug: selected-only weight 550 wrapped DBMS, growing its row from 38px to 56px and shifting subsequent rows by 18px. Removing that weight gave zero selection shift. The later grouped-sidebar revision also passed bounding-box comparisons when selecting Operating Systems and DBMS without changing expansion.
+- Grouped Exam revision opened with two selected topics and exactly one composer. Study → Chat retained its ID, unsent draft and original Normalization question; assistance remained empty.
+- Explain normalization → Study → Send recorded a Chat guidance turn and a distinct assisted Study answer attributed to Normalization. The sibling conversation remained unchanged; the composer cleared and no backend/model requests occurred.
+- Topics → add Indexing → Apply preserved the question and yielded three selected topics. Different drafts in Exam revision and Normalization practice survived navigation, and Exam revision retained its two turns.
+- New conversation inherited DBMS and its topic catalog, remained pending before sending, then Enter in Chat saved General DBMS discussion as the third nested conversation. A non-guidance Chat turn did not mark assistance.
+- First launch → Computer Networks with Routing/TCP produced an expanded folder with 0 assessed topics. Manual creation stayed enabled; model-dependent study was blocked.
+- Practice before answering retained pending Chat assistance. After the assisted answer, Practice created a fresh question eligible for an independent attempt while the old turn stayed assisted and the Chat turn retained its mode.
+- During simulated recording, both modes, the topic selector, conversation navigation and Send were disabled while Stop remained available. No real microphone was accessed.
+- At 390px, the shared workspace had one composer and no horizontal overflow. The Subjects drawer opened/closed, and bottom Settings remained visible and unobscured.
+- Web TypeScript/build, lint and the 107 existing web tests pass. The production bundle omits prototype JavaScript. No permanent prototype test suite was added; these checks establish runnable exploration, not production assessment correctness or usability approval.
+
+## Limitations
+
+All responses, source support, downloads, model states and starting progress are fixtures. Even a labelled independent answer is not a validated judgment, and the demo never updates saved topic progress. Reference applicability is conservatively simulated for the supplied Normalization excerpt; other topics remain provisional.
+
+The Chat simulation detects simple guidance words and selected topic names, with an explicit Explain action for a deterministic walkthrough. Production must record actual delivered help and its topic scope, not copy this heuristic or penalize failed requests. Persistence, material-revision invalidation, minimum supported platforms, asynchronous generation/cancellation and durable request recovery need production tests.
+
+The modal panels and mobile drawer do not provide complete production focus management. This is not an accessibility completion, setup/inference test, real recording test, data migration, packaged installer or trusted-distribution validation. Keep the disclaimer and lab controls while reviewing; exclude them from the implemented product.

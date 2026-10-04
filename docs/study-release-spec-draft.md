@@ -36,7 +36,7 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 22. As a learner, I want detailed assessment evidence available when needed, so the main question is not buried under history.
 23. As a learner, I want to review syllabus/reference extraction before approval, so unreviewed material cannot change assessment support.
 24. As a learner, I want edited or removed evidence to trigger reassessment correctly, so progress stays tied to current support.
-25. As a learner, I want ordinary Chat available separately with the same voice/text controls, so studying does not remove general chat.
+25. As a learner, I want Study and Chat selectable in one conversation workspace with the same voice/text controls, so I do not need separate destinations.
 26. As a tester, I want setup to detect a compatible existing Ollama service/model, so I do not duplicate installations or downloads.
 27. As a tester, I want a native guided route to install/start Ollama if missing, so I do not need shell instructions.
 28. As a tester, I want model terms and download requirements shown before consent, so I can choose whether to proceed.
@@ -48,13 +48,18 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 34. As an existing desktop user, I want failed upgrades and unsupported newer data reported without reset, so errors never silently empty my library.
 35. As a tester, I want closing/reopening to retain state and shut down only the app-owned backend, so another server or my Ollama service is unaffected.
 36. As a tester, I want the signed, notarized download to pass Gatekeeper without workarounds, so normal installation is sufficient.
+37. As a learner, I want subjects to group their conversations in the sidebar, so I can keep multiple independent conversations in one subject.
+38. As a learner, I want new conversations to inherit subject topics, approved materials and progress, so I do not repeat subject setup.
+39. As a learner, I want to select one or several topics within a conversation, so I can choose its scope while assessment remains attributable to a specific topic.
+40. As a learner, I want each conversation to keep its own history and draft, so shared subject context does not merge my conversations.
 
 ## Implementation Decisions
 
 ### Confirmed constraints
 
 - Apple Silicon macOS first; small tester audience; cross-platform architecture retained.
-- Study-first home and navigation, with ordinary Chat separate and a shared voice/text composer.
+- Study-first subject home and navigation. Study and Chat are selectable modes of one conversation workspace with a shared voice/text composer; separate sidebar destinations are superseded.
+- Subjects group multiple conversations. Subject topics, approved material and progress are shared; sibling message histories and drafts are not merged. Conversations can select several topics, but each assessed answer remains attributable to a specific topic.
 - Reuse existing subjects, syllabus, reference material, assessment evidence, topic assessments and revision priorities. Do not replace the assessment rules or imply validated grading accuracy beyond the existing evidence.
 - Preserve app-owned backend ownership, per-user desktop data, independent conversation identity and exclusive microphone ownership.
 - Keep manual organization available before model setup. Disable only actions whose dependencies are unavailable and explain what is missing.
@@ -75,7 +80,11 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 
 ### Selected UI direction
 
-- Use B's Revision queue, with an expanded desktop sidebar showing Study, Chat, subjects and New subject. Pin Settings at the bottom independently of subject-list scrolling.
+- Use B's Revision queue and expanded desktop sidebar with expandable subject groups, nested conversation titles, New conversation within a subject and New subject. Pin Settings at the bottom independently of group/conversation scrolling. Remove separate Study/Chat navigation entries.
+- A single conversation workspace offers a Study/Chat mode selector, a topic selector populated from its subject, and one shared composer. Subject context is inherited without repeating setup. The revised in-memory prototype demonstrates this refinement; production integration remains unimplemented.
+- Confirmed transition rules: mode switches preserve the current conversation, draft and saved question; prior messages retain their mode and topic attribution, and Chat messages are not retroactively assessed. Relevant explanations/hints delivered in Chat make the corresponding Study attempt assisted; merely switching modes does not. Retries must preserve that assistance, and completing an assisted attempt must not permanently prevent future independent attempts.
+- Production must associate each accepted turn with its actual mode, assessment topic/question, selected-topic scope and applicable evidence/reference context. Do not reinterpret accepted requests, retries or old messages using a later mode/topic selection. Track delivered guidance rather than infer assistance merely from a user's request or the prototype's keyword heuristic.
+- Topic changes must not silently reinterpret an unsent answer or redirect an active recording. Study and Chat use the same composer; the prototype blocks topic changes with a draft and mode/conversation changes during simulated recording. Carry these recovery/routing cases into production tests.
 - Use the selected subject name as the home heading, distinguish assessed coverage from demonstrated understanding, and keep one next-topic action above the ordered revision queue. Do not repeat subject navigation in tabs.
 - No persistent readiness indicators, Local badge, decorative eyebrow headings, motivational slogans or static study-step strip. Every heading identifies content. Additional text must explain an action, result, evidence or recoverable error.
 - Keep setup in Settings. Show missing dependencies or connection failures only where they affect an attempted/available action; retain download progress, consent, cancellation and explicit retries.
@@ -86,7 +95,7 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 Proposed seams for learner approval before publishing:
 
 1. **Packaged desktop app:** installed artifact and rendered UI driven as a learner would use it. Cover production launch, no-development-tool runtime, setup and capability states, native lifecycle, data upgrade/reopen, renderer security and unrelated-process ownership. Real-device/clean-machine/Gatekeeper checks complement automation; mocks cannot prove microphone attribution or trusted distribution.
-2. **Rendered Study/Chat UI through existing backend boundaries:** subject creation before models, resume, reviewed drafts/first send, dictation routing, setup recovery, question/feedback/evidence/reference review, progress semantics, keyboard behavior and ordinary-chat parity. Prior art: existing App, Study, voice-level and permission suites.
+2. **Rendered Study/Chat UI through existing backend boundaries:** subject creation before models, resume, reviewed drafts/first send, dictation routing, setup recovery, question/feedback/evidence/reference review, progress semantics, keyboard behavior and ordinary-chat parity. Include nested conversation creation/first send, independent drafts/history, inherited subject context, topic scope changes without draft reinterpretation, mode switching with a saved question, and delivered Chat guidance followed by an assisted Study answer. Assert that mode toggles alone do not add assistance, failed retries retain original context, Chat messages are not retroactively graded and new independent attempts are possible. Prior art: existing App, Study, voice-level and permission suites.
 3. **Setup/backend HTTP and external-model boundaries:** actual HTTP/progress contracts with controlled Ollama/download/permission failures at external boundaries. Cover checksum/atomic activation, terminal streaming errors, cancellation without killing shared services, readiness versus availability and migration failures. Prior art: existing backend HTTP, persistence, recovery and desktop lifecycle suites.
 
 Test externally visible outcomes, not private state or mocks of internal collaborators. Use red-green vertical slices at approved seams. Retain narrow real-model smoke checks and label their limits. A health response is not voice/model readiness, relocation is not a clean-machine test, and ad-hoc signing is not a notarized release.
@@ -115,8 +124,8 @@ Release acceptance includes a populated current-desktop upgrade fixture, an inte
 |---|---|---|---|
 | 1 | Launch the production desktop UI with a bundled backend | None | An internal arm64 app opens outside the checkout, saves a conversation and shuts down/reopens its owned backend without developer tools. |
 | 2 | Preserve existing desktop data across packaged upgrades | 1 | A populated current desktop fixture keeps conversations, profile drafts, subjects/progress and pending delivery; failed/unsupported upgrades never reset data. |
-| 3 | Open to Study home and resume a saved topic | None | B's minimal revision-queue home uses an expanded sidebar with bottom Settings, no readiness indicators or decorative headings, real subjects, distinct progress counts and revision priorities. Manual subject/topic creation works without models; ordinary Chat stays available. |
-| 4 | Study a topic in the focused shared voice/text workspace | 3 | Real topic resume, one question, reviewed composer, honest feedback, assisted/independent evidence and finish/retry flows work in the selected layout. |
+| 3 | Open to Study home and resume a saved topic | None | B's minimal revision-queue home uses expandable subject groups and nested independent conversations, inherited subject context, bottom Settings, no readiness indicators or decorative headings, distinct progress counts and revision priorities. Manual subject/topic creation works without models. |
+| 4 | Study a topic in the focused shared voice/text workspace | 3 | One workspace supports Study/Chat selection and one or several selected subject topics, with per-topic assessment attribution. Real topic resume, one question, reviewed composer, honest feedback, assisted/independent evidence and finish/retry flows work without losing drafts/history when switching modes. |
 | 5 | Guide Ollama setup and enable validated local chat/study | 1 | Native install/reuse guidance, consented Gemma pull, truthful progress/cancel/retry/later, and validated local chat/study readiness work without terminal commands or service takeover. |
 | 6 | Set up Whisper and dictate from the packaged app | 1 | Consented verified voice-model setup, OutLoud microphone consent/denial recovery, real dictation to the correct draft, and independent recording/generation controls work. |
 | 7 | Review study material and inspect evidence without leaving the workflow | 4 | Existing syllabus/reference approval and invalidation semantics are exposed in focused panels, with accessible review, source support and assessment history. |

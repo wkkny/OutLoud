@@ -1,143 +1,254 @@
-// THROWAWAY: three Study layouts on the existing app route, ?prototype=study-release&variant=A|B|C.
-// All data, feedback, recording, and download actions are simulated in memory. No backend calls.
+// THROWAWAY: subject folders and a shared Study/Chat workspace on ?prototype=study-release&variant=A|B|C.
+// In-memory demo only. No backend, models, microphone, storage or real assessment.
 import { useEffect, useState } from 'react'
-import { ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, BookOpen, Check, ChevronRight, CircleHelp, FileText, MessageSquare, Mic, Plus, Settings2, Square, X } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, FileText, Folder, Menu, Mic, Plus, Settings2, Square, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import './prototype-study-release.css'
 
 type Variant = 'A' | 'B' | 'C'
-type Screen = 'home' | 'study' | 'chat'
+type Mode = 'Study' | 'Chat'
 type Readiness = 'ready' | 'missing' | 'downloading' | 'error' | 'offline'
 type Topic = { name: string; status: 'Needs revision' | 'Partial understanding' | 'Not assessed' | 'Demonstrated understanding'; weight: number | null; evidence: number }
+type Subject = { name: string; topics: Topic[]; reference: string; approved: boolean }
+type Turn = { id: string; mode: Mode; topic: string | null; question: string; answer: string; reply: string; assisted: boolean; provisional: boolean; failed: boolean; guidanceTopics: string[] }
+type Conversation = { id: string; subject: string; title: string; saved: boolean; mode: Mode; selectedTopics: string[]; activeTopic: string | null; questions: Record<string, string>; assistedTopics: string[]; draft: string; turns: Turn[]; finished: boolean }
 const variants: Record<Variant, string> = { A: 'Study dashboard', B: 'Revision queue', C: 'Subject notebook' }
-const startingTopics: Topic[] = [
-  { name: 'Normalization', status: 'Needs revision', weight: 20, evidence: 2 },
-  { name: 'Transactions', status: 'Partial understanding', weight: 25, evidence: 1 },
-  { name: 'Indexing', status: 'Not assessed', weight: null, evidence: 0 },
-  { name: 'Relational algebra', status: 'Demonstrated understanding', weight: 15, evidence: 3 },
+const dbms = 'Database Management Systems'
+const os = 'Operating Systems'
+const sourceText = 'A relation is in 3NF when, for each non-trivial functional dependency X → A, X is a superkey or A is a prime attribute. Removing transitive dependencies can prevent update anomalies.'
+const initialSubjects: Subject[] = [
+  { name: dbms, reference: sourceText, approved: true, topics: [
+    { name: 'Normalization', status: 'Needs revision', weight: 20, evidence: 2 },
+    { name: 'Transactions', status: 'Partial understanding', weight: 25, evidence: 1 },
+    { name: 'Indexing', status: 'Not assessed', weight: null, evidence: 0 },
+    { name: 'Relational algebra', status: 'Demonstrated understanding', weight: 15, evidence: 3 },
+  ] },
+  { name: os, reference: '', approved: false, topics: [
+    { name: 'Process scheduling', status: 'Not assessed', weight: null, evidence: 0 },
+    { name: 'Deadlocks', status: 'Partial understanding', weight: 15, evidence: 1 },
+  ] },
+]
+const questionFor = (topic: string) => topic === 'Normalization'
+  ? 'Explain how third normal form prevents a transitive dependency. Can you give an example of a table you would split?'
+  : `Explain ${topic.toLowerCase()} in your own words, with an example.`
+const explanationFor = (topic: string) => topic === 'Normalization'
+  ? 'For example, Employee → Department → Department name is a transitive dependency. Store department details separately to avoid updating the same name in every employee row.'
+  : `Demo guidance for ${topic.toLowerCase()}: identify the main idea, then connect it to a concrete example. No model was called.`
+const makeConversation = (id: string, subject: string, title: string, selectedTopics: string[], saved = true): Conversation => ({
+  id, subject, title, saved, mode: selectedTopics.length ? 'Study' : 'Chat', selectedTopics,
+  activeTopic: selectedTopics[0] ?? null, questions: Object.fromEntries(selectedTopics.map(topic => [topic, questionFor(topic)])),
+  assistedTopics: [], draft: '', turns: [], finished: false,
+})
+const initialConversations = [
+  makeConversation('normalization', dbms, 'Normalization practice', ['Normalization']),
+  makeConversation('exam', dbms, 'Exam revision', ['Normalization', 'Transactions']),
+  makeConversation('scheduling', os, 'Scheduling notes', ['Process scheduling']),
 ]
 const statusClass = (status: Topic['status']) => status === 'Needs revision' ? 'needs' : status === 'Demonstrated understanding' ? 'demonstrated' : 'neutral'
-const question = 'Explain how third normal form prevents a transitive dependency. Can you give an example of a table you would split?'
-const sourceText = 'A relation is in 3NF when, for each non-trivial functional dependency X → A, X is a superkey or A is a prime attribute. Removing transitive dependencies can prevent update anomalies.'
 
 export default function StudyReleasePrototype() {
-  const params = new URLSearchParams(location.search)
-  const initialVariant = params.get('variant') as Variant
+  const initialVariant = new URLSearchParams(location.search).get('variant') as Variant
   const [variant, setVariant] = useState<Variant>(initialVariant in variants ? initialVariant : 'B')
-  const [screen, setScreen] = useState<Screen>('home')
+  const [subjects, setSubjects] = useState(initialSubjects)
+  const [subjectName, setSubjectName] = useState(dbms)
+  const subject = subjects.find(item => item.name === subjectName)!
+  const [expanded, setExpanded] = useState<string[]>([dbms])
+  const [conversations, setConversations] = useState(initialConversations)
+  const [conversationId, setConversationId] = useState<string | null>(null)
+  const current = conversations.find(item => item.id === conversationId)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [readiness, setReadiness] = useState<Readiness>('ready')
   const [progress, setProgress] = useState(0)
   const [setup, setSetup] = useState(false)
-  const [subjects, setSubjects] = useState(['Database Management Systems', 'Operating Systems'])
-  const [subject, setSubject] = useState('Database Management Systems')
-  const [subjectTopics, setSubjectTopics] = useState<Record<string, Topic[]>>({
-    'Database Management Systems': startingTopics,
-    'Operating Systems': [
-      { name: 'Process scheduling', status: 'Not assessed', weight: null, evidence: 0 },
-      { name: 'Deadlocks', status: 'Partial understanding', weight: 15, evidence: 1 },
-    ],
-  })
-  const topics = subjectTopics[subject] ?? []
-  const nextTopic = topics[0]
-  const [topic, setTopic] = useState('Normalization')
   const [newSubject, setNewSubject] = useState(false)
-  const [subjectName, setSubjectName] = useState('')
-  const [topicNames, setTopicNames] = useState('')
-  const [draft, setDraft] = useState('')
+  const [newSubjectName, setNewSubjectName] = useState('')
+  const [newTopics, setNewTopics] = useState('')
   const [recording, setRecording] = useState(false)
-  const [answer, setAnswer] = useState('')
-  const [feedback, setFeedback] = useState(false)
-  const [guided, setGuided] = useState(false)
-  const [finished, setFinished] = useState(false)
   const [provisional, setProvisional] = useState(false)
-  const [showEvidence, setShowEvidence] = useState(false)
-  const [showMaterials, setShowMaterials] = useState(false)
-  const [reviewed, setReviewed] = useState(true)
-  const [reference, setReference] = useState(sourceText)
   const [feedbackFailed, setFeedbackFailed] = useState(false)
+  const [details, setDetails] = useState<'materials' | 'evidence' | null>(null)
+  const [topicPicker, setTopicPicker] = useState(false)
+  const [topicSelection, setTopicSelection] = useState<string[]>([])
   const ready = readiness === 'ready'
-  const modelMessage = readiness === 'offline' ? 'Connection lost. Your draft is saved here.' : readiness === 'downloading' ? `Downloading models · ${progress}%` : readiness === 'error' ? 'Download interrupted. Retry in settings.' : 'Install the study model to continue.'
-  const activeTopic = topics.find(item => item.name === topic)
-  const state = { variant, screen, subject, topic, readiness, progress, draft, recording, guided, provisional, reviewed, feedbackFailed, finished, answer, subjects, topics }
+  const modelMessage = readiness === 'offline' ? 'Connection lost. Your draft stays here.' : readiness === 'downloading' ? `Downloading models · ${progress}%` : readiness === 'error' ? 'Download interrupted. Retry in settings.' : 'Install the local model to continue.'
+  const activeTopic = subject.topics.find(item => item.name === current?.activeTopic)
+  const subjectConversations = conversations.filter(item => item.subject === subject.name && item.saved)
+  const nextTopic = subject.topics[0]
+  const assessed = subject.topics.filter(item => item.evidence > 0).length
+  const demonstrated = subject.topics.filter(item => item.status === 'Demonstrated understanding').length
+  const state = { variant, subject, expanded, conversationId, conversations, readiness, progress, recording, provisional, feedbackFailed }
+  const updateConversation = (id: string, update: (value: Conversation) => Conversation) => setConversations(previous => previous.map(item => item.id === id ? update(item) : item))
+  const updateCurrent = (update: (value: Conversation) => Conversation) => { if (current) updateConversation(current.id, update) }
+  const expandSubject = (name: string) => setExpanded(previous => previous.includes(name) ? previous : [...previous, name])
+  const openSubject = (name: string) => { setSubjectName(name); setConversationId(null); setSidebarOpen(false) }
+  const openConversation = (value: Conversation) => { setSubjectName(value.subject); setConversationId(value.id); expandSubject(value.subject); setSidebarOpen(false) }
+  const createConversation = (name: string, topic?: string) => {
+    const pending = conversations.find(item => item.subject === name && !item.saved)
+    if (pending) { openConversation(pending); return }
+    const selected = topic ?? subjects.find(item => item.name === name)?.topics[0]?.name
+    const value = makeConversation(crypto.randomUUID(), name, 'New conversation', selected ? [selected] : [], false)
+    setConversations(previous => [...previous, value]); openConversation(value)
+  }
+  const studyTopic = (topic: string) => {
+    const saved = subjectConversations.find(item => item.activeTopic === topic)
+    if (saved) openConversation(saved)
+    else createConversation(subject.name, topic)
+  }
   const changeVariant = (next: Variant) => {
     setVariant(next)
-    const url = new URL(location.href)
-    url.searchParams.set('variant', next)
-    history.replaceState(null, '', url)
+    const url = new URL(location.href); url.searchParams.set('variant', next); history.replaceState(null, '', url)
   }
   const cycle = (delta: number) => {
-    const keys: Variant[] = ['A', 'B', 'C']
-    changeVariant(keys[(keys.indexOf(variant) + delta + keys.length) % keys.length])
+    const keys: Variant[] = ['A', 'B', 'C']; changeVariant(keys[(keys.indexOf(variant) + delta + keys.length) % keys.length])
   }
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.target instanceof HTMLElement) || event.target.closest('input, textarea, select, [contenteditable="true"]')) return
+      if (!(event.target instanceof HTMLElement) || event.target.closest('input, textarea, select, button, [role="dialog"], [contenteditable="true"]')) return
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); cycle(event.key === 'ArrowLeft' ? -1 : 1) }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey)
   })
   useEffect(() => {
     if (readiness !== 'downloading') return
     const timer = setInterval(() => setProgress(previous => Math.min(previous + 5, 100)), 250)
     return () => clearInterval(timer)
   }, [readiness])
-  const startTopic = (name: string) => {
-    setTopic(name); setScreen('study'); setAnswer(''); setFeedback(false); setGuided(false); setFinished(false); setFeedbackFailed(false)
+
+  // Guidance classification is a deliberately small demo heuristic, not an assessment model.
+  const chatGuidanceTopics = (value: Conversation, text: string) => {
+    if (!/\b(explain|hint|help|teach|example|why|how)\b/i.test(text)) return []
+    const mentioned = value.selectedTopics.filter(topic => text.toLowerCase().includes(topic.toLowerCase()))
+    return mentioned.length ? mentioned : value.activeTopic ? [value.activeTopic] : []
+  }
+  const addTurn = (value: Conversation, text: string, guidanceTopics: string[] = []) => {
+    const isStudy = value.mode === 'Study'
+    const topic = isStudy ? value.activeTopic : null
+    const turn: Turn = {
+      id: crypto.randomUUID(), mode: value.mode, topic, question: topic ? value.questions[topic] : '', answer: text,
+      reply: isStudy ? `Demo feedback for ${topic}: your answer is retained. A real assessment would check its claims against applicable approved references.`
+        : guidanceTopics.length ? guidanceTopics.map(explanationFor).join('\n\n') : `Demo reply in ${subject.name}. This Chat turn is not assessment evidence. No model was called.`,
+      assisted: !!topic && value.assistedTopics.includes(topic), provisional: provisional || !subject.approved || subject.name !== dbms || subject.reference !== sourceText || topic !== 'Normalization',
+      failed: isStudy && feedbackFailed, guidanceTopics,
+    }
+    return {
+      ...value, saved: true, title: value.saved ? value.title : isStudy ? `${topic} practice` : text.slice(0, 42),
+      turns: [...value.turns, turn], finished: isStudy ? false : value.finished,
+      // Keep assistance on retries/repeated answers to the same question. Mode switches never clear it.
+      assistedTopics: [...new Set([...value.assistedTopics, ...guidanceTopics])],
+    }
   }
   const send = () => {
-    if (!ready || !draft.trim()) return
-    setAnswer(draft); setDraft(''); setFeedback(true); setFinished(false)
+    if (!current || !ready || recording || !current.draft.trim() || (current.mode === 'Study' && !current.activeTopic) || (current.finished && current.mode === 'Study')) return
+    updateCurrent(value => ({ ...addTurn(value, value.draft, value.mode === 'Chat' ? chatGuidanceTopics(value, value.draft) : []), draft: '' }))
+  }
+  const explain = () => {
+    if (!current?.activeTopic || !ready || recording) return
+    const topic = current.activeTopic
+    updateCurrent(value => addTurn({ ...value, mode: 'Chat' }, `Explain ${topic.toLowerCase()}.`, [topic]))
+  }
+  const freshQuestion = () => {
+    if (!current?.activeTopic || current.draft.trim() || recording) return
+    const topic = current.activeTopic
+    const count = current.turns.filter(turn => turn.topic === topic).length + 1
+    updateCurrent(value => {
+      const answerIndex = value.turns.findLastIndex(turn => turn.topic === topic && turn.question === value.questions[topic] && !turn.failed)
+      const helpIndex = value.turns.findLastIndex(turn => turn.guidanceTopics.includes(topic))
+      return { ...value, finished: false, assistedTopics: answerIndex >= 0 && answerIndex > helpIndex ? value.assistedTopics.filter(item => item !== topic) : value.assistedTopics, questions: { ...value.questions, [topic]: `Give a fresh example of ${topic.toLowerCase()}. Explain your reasoning and a case where it would not apply. (Practice ${count})` } }
+    })
   }
   const toggleRecording = () => {
-    if (recording) { setRecording(false); setDraft(previous => [previous, 'I would separate the department details because the department name depends on the department ID, rather than directly on the employee ID.'].filter(Boolean).join('\n')) }
-    else if (ready) setRecording(true)
+    if (recording) {
+      setRecording(false)
+      updateCurrent(value => ({ ...value, draft: [value.draft, `My explanation of ${value.activeTopic?.toLowerCase() ?? 'this subject'} starts with a concrete example.`].filter(Boolean).join('\n') }))
+    } else if (ready && current && !(current.finished && current.mode === 'Study')) setRecording(true)
   }
-  const openHome = () => { setScreen('home'); setRecording(false) }
+  const applyTopics = () => {
+    if (!current || recording) return
+    const nextActive = current.activeTopic && topicSelection.includes(current.activeTopic) ? current.activeTopic : topicSelection[0] ?? null
+    if (current.draft.trim() && nextActive !== current.activeTopic) return
+    updateCurrent(value => ({ ...value, selectedTopics: topicSelection, activeTopic: nextActive, questions: { ...Object.fromEntries(topicSelection.map(topic => [topic, questionFor(topic)])), ...value.questions } }))
+    setTopicPicker(false)
+  }
   const status = (item: Topic) => <span className={`prototype-status ${statusClass(item.status)}`}>{item.status}</span>
-  const assessed = topics.filter(item => item.evidence > 0).length
-  const demonstrated = topics.filter(item => item.status === 'Demonstrated understanding').length
-  const stats = <div className="prototype-stats"><div><strong>{assessed} / {topics.length}</strong><span>Topics assessed</span></div><div><strong>{demonstrated} / {topics.length}</strong><span>Understanding demonstrated</span></div><div><strong>Unknown</strong><span>Exam date · add when ready</span></div></div>
-  const resume = <section className="prototype-resume"><h2>{nextTopic?.name ?? 'Add topics to get started'}</h2><p>{nextTopic?.evidence ? 'Continue with the last saved question and reviewed answer. Progress is supported by your evidence, not time spent.' : 'Start with your own explanation. Topics you have not studied remain not assessed.'}</p><Button onClick={() => { if (nextTopic) startTopic(nextTopic.name) }} disabled={!ready || !nextTopic}>{nextTopic?.evidence ? 'Resume studying' : 'Study a topic'} <ArrowRight size={16} /></Button></section>
-  const topicRows = <div className="prototype-topic-list">{topics.map((item, index) => <button key={item.name} onClick={() => startTopic(item.name)} disabled={!ready} className="prototype-topic-row"><span className="prototype-priority">{String(index + 1).padStart(2, '0')}</span><div><strong>{item.name}</strong><small>{item.weight === null ? 'Exam importance unknown' : `${item.weight}% exam importance`} · {item.evidence ? `${item.evidence} evidence ${item.evidence === 1 ? 'record' : 'records'}` : 'No assessment evidence yet'}</small></div>{status(item)}<ChevronRight size={16} /></button>)}</div>
-  const homeHeading = <header className="prototype-section-heading"><div><h1>Study</h1></div><Button variant="outline" onClick={() => setNewSubject(true)}><Plus size={16} /> New subject</Button></header>
-  const subjectTabs = <nav className="prototype-subject-tabs" aria-label="Subjects">{subjects.map(name => <Button key={name} variant={subject === name ? 'secondary' : 'ghost'} onClick={() => setSubject(name)}>{name}</Button>)}</nav>
-  const home = variant === 'A' ? <>
-    {homeHeading}{subjectTabs}{stats}
-    <div className="prototype-dashboard-grid">{resume}<section className="prototype-material-card"><FileText size={22} /><h3>Materials</h3><p>{topics.length} topics · approved reference fixture. Review the sources used to assess your answers.</p><Button variant="outline" onClick={() => setShowMaterials(true)}>Manage materials</Button></section></div>
-    <section><div className="prototype-list-heading"><h2>Revision queue</h2></div>{topicRows}</section>
-  </> : variant === 'B' ? <>
-    <header className="prototype-queue-heading"><h1>{subject}</h1><Button variant="ghost" onClick={() => setShowMaterials(true)}><FileText size={16} /> Materials</Button></header>
-    <div className="prototype-queue-summary"><span><strong>{assessed} of {topics.length}</strong> assessed</span><span><strong>{demonstrated}</strong> understanding demonstrated</span></div>
-    <section className="prototype-next-topic"><h2>{nextTopic?.name ?? 'Add your first topic'}</h2>{nextTopic && <p>{nextTopic.name === 'Normalization' ? 'Revisit transitive dependencies.' : nextTopic.evidence ? 'Continue your last question.' : 'Start with your own explanation.'}</p>}<Button onClick={() => { if (nextTopic) startTopic(nextTopic.name) }} disabled={!ready || !nextTopic}>{nextTopic?.evidence ? 'Continue studying' : 'Study topic'} <ArrowRight size={16} /></Button>{!ready && <p className="prototype-inline-warning">{modelMessage} <button onClick={() => setSetup(true)}>Open settings</button></p>}</section>
-    <h2 className="prototype-small-heading">Revision queue</h2>{topicRows}
-  </> : <div className="prototype-notebook">
-    <aside className="prototype-notebook-index">{subjects.map(name => <button key={name} className={subject === name ? 'active' : ''} onClick={() => setSubject(name)}><BookOpen size={17} />{name}</button>)}<Button variant="ghost" onClick={() => setNewSubject(true)}><Plus size={16} /> Add subject</Button><hr />{topics.map(item => <button key={item.name} onClick={() => startTopic(item.name)} disabled={!ready}>{item.name}<span className={`prototype-dot ${statusClass(item.status)}`} /></button>)}<Button variant="ghost" onClick={() => setShowMaterials(true)}><FileText size={16} /> Reference material</Button></aside>
-    <section className="prototype-notebook-page"><h1>{subject}</h1><p>Learning is more than covering the syllabus. See what your answers actually demonstrate.</p>{stats}{resume}<h2 className="prototype-small-heading">Recent study evidence</h2><div className="prototype-timeline">{topics.filter(item => item.evidence > 0).map(item => <article key={item.name}><span>Illustrative saved evidence</span><strong>{item.name} · {item.status.toLowerCase()}</strong><p>{item.evidence} supporting records. Review the answers and source support before relying on this assessment.</p><button onClick={() => setShowEvidence(true)}>Read supporting evidence <ArrowRight size={14} /></button></article>)}{!assessed && <p>No assessment evidence yet. Studying a topic will start with your own explanation.</p>}</div></section>
-  </div>
-  const studyHeader = <div className="prototype-study-heading"><Button variant="ghost" onClick={openHome}><ArrowLeft size={16} /> Study home</Button><div><span>{subject}</span><h1>{topic}</h1></div><div className="prototype-study-status">{activeTopic && status(activeTopic)}<small>Exam importance: {activeTopic?.weight == null ? 'Unknown' : `${activeTopic.weight}%`}</small></div></div>
-  const sourcePanel = <section className="prototype-source"><FileText size={18} /><h3>Reference for this topic</h3><p>{reference}</p><small>Approved textbook excerpt · illustrative fixture</small><Button variant="ghost" onClick={() => setShowMaterials(true)}>Review material</Button></section>
-  const conversation = <div className="prototype-conversation">
-    <section className="prototype-question"><h2>{screen === 'chat' ? 'What would you like to talk about?' : guided ? 'Give a new example of an update anomaly. Explain which dependency causes it and how you would remove it.' : topic === 'Normalization' ? question : `Explain ${topic.toLowerCase()} in your own words, with an example.`}</h2></section>
-    {answer && <section className="prototype-answer"><h3>Your answer{guided ? ' · after guidance' : ''}</h3><p>{answer}</p></section>}
-    {feedback && <section className="prototype-feedback"><div className="prototype-feedback-heading"><AudioLines size={18} /><strong>{screen === 'chat' ? 'Response' : 'Feedback'}</strong></div>{feedbackFailed ? <><p>Your answer is retained. Feedback was interrupted; no topic assessment has been updated.</p><Button variant="outline" onClick={() => setFeedbackFailed(false)}>Retry feedback</Button></> : <><p>{screen === 'chat' ? 'This is a prototype conversation. No message was sent to a model.' : 'The sample answer separates employee and department details. A follow-up should check that the learner understands which functional dependency causes the anomaly.'}</p><div className="prototype-feedback-trust"><CircleHelp size={16} /><p>{provisional || !reviewed ? 'Provisional guidance · no approved source support. This does not establish a knowledge gap or update progress.' : guided ? 'Answer after guidance · practice is useful, but this answer alone cannot establish independent understanding.' : 'Illustrative reference-supported feedback. Progress stays unchanged in this prototype; real assessment requires sufficient independent evidence.'}</p></div>{screen === 'study' && <><p className="prototype-followup"><strong>Next question</strong>What changes if the department name is duplicated in every employee row?</p><div className="prototype-feedback-actions"><Button variant="outline" onClick={() => setGuided(true)}>Explain this</Button><Button variant="outline" onClick={() => { setGuided(true); setFeedback(false) }}>Practice this</Button><Button variant="ghost" onClick={openHome}>Move on</Button><Button variant="ghost" onClick={() => setFinished(true)}>Finish studying</Button></div></>}</> }</section>}
-    {finished && <section className="prototype-summary"><Check size={18} /><div><h3>Session summary</h3><p>One reviewed answer · {guided ? 'guidance used' : 'independent attempt'}. No new assessment was recorded in this demo.</p><Button variant="outline" onClick={openHome}>Back to study home</Button></div></section>}
-  </div>
-  const composer = <div className="prototype-composer-dock">{!ready && <p className="prototype-inline-warning">{modelMessage} <button onClick={() => setSetup(true)}>Open settings</button></p>}<div className="prototype-composer"><label className="sr-only" htmlFor="prototype-composer">Your answer</label><Textarea id="prototype-composer" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() } }} placeholder={screen === 'study' ? 'Explain it in your own words…' : 'Message OutLoud…'} /><div className="prototype-composer-toolbar"><span>Gemma 3:4b</span><Button variant={recording ? 'destructive' : 'ghost'} onClick={toggleRecording} disabled={!recording && !ready} aria-label={recording ? 'Stop demo recording' : 'Start demo recording'}>{recording ? <Square size={17} /> : <Mic size={17} />}{recording ? 'Stop' : 'Dictate'}</Button><Button onClick={send} disabled={!ready || !draft.trim()} aria-label="Send answer"><ArrowRight size={17} /> Send</Button></div></div><div className="prototype-composer-note"><span>{recording ? 'Simulated capture · stopping inserts example dictation' : 'Enter to send · Shift+Enter for a new line'}</span><button onClick={() => setShowEvidence(true)}>View assessment evidence</button></div></div>
+  const warning = <p className="prototype-inline-warning">{modelMessage} <button onClick={() => setSetup(true)}>Open settings</button></p>
+  const materialButton = <Button variant="ghost" onClick={() => setDetails('materials')}><FileText size={16} /> Materials</Button>
+  const stats = <div className="prototype-queue-summary"><span><strong>{assessed} of {subject.topics.length}</strong> assessed</span><span><strong>{demonstrated}</strong> understanding demonstrated</span></div>
+  const next = <section className="prototype-next-topic"><h2>{nextTopic?.name ?? 'Add your first topic'}</h2>{nextTopic && <p>{nextTopic.name === 'Normalization' ? 'Revisit transitive dependencies.' : nextTopic.evidence ? 'Continue your last question.' : 'Start with your own explanation.'}</p>}<Button onClick={() => nextTopic && studyTopic(nextTopic.name)} disabled={!ready || !nextTopic}>{nextTopic?.evidence ? 'Continue studying' : 'Study topic'} <ArrowRight size={16} /></Button>{!ready && warning}</section>
+  const rows = <div className="prototype-topic-list">{subject.topics.map((item, index) => <button key={item.name} onClick={() => studyTopic(item.name)} disabled={!ready} className="prototype-topic-row"><span className="prototype-priority">{String(index + 1).padStart(2, '0')}</span><div><strong>{item.name}</strong><small>{item.weight === null ? 'Exam importance unknown' : `${item.weight}% exam importance`} · {item.evidence ? `${item.evidence} evidence ${item.evidence === 1 ? 'record' : 'records'}` : 'No assessment evidence yet'}</small></div>{status(item)}<ChevronRight size={16} /></button>)}</div>
+  const home = <>
+    <header className="prototype-queue-heading"><h1>{subject.name}</h1>{materialButton}</header>{stats}
+    {variant === 'A' ? <div className="prototype-dashboard-grid">{next}<section className="prototype-material-card"><h3>Conversations</h3>{subjectConversations.map(item => <Button key={item.id} variant="ghost" onClick={() => openConversation(item)}>{item.title}<ArrowRight size={14} /></Button>)}</section></div> : next}
+    <h2 className="prototype-small-heading">{variant === 'C' ? 'Syllabus' : 'Revision queue'}</h2>{rows}
+    {variant === 'C' && <section className="prototype-source"><h3>Subject reference</h3><p>{subject.reference || 'No approved reference yet.'}</p>{materialButton}</section>}
+  </>
+  const topicChangeBlocked = !!current && !!current.draft.trim() && !!current.activeTopic && !topicSelection.includes(current.activeTopic)
+  const studyTurn = current?.turns.filter(turn => turn.mode === 'Study').at(-1)
 
   return <div className={`study-release-prototype variant-${variant}`}>
     <div className="prototype-banner">Prototype · demo data and actions · resets on reload</div>
+    <div className="prototype-mobile-nav"><Button variant="ghost" onClick={() => setSidebarOpen(true)} aria-label="Open subjects"><Menu size={18} /></Button><strong>OutLoud</strong></div>
+    {sidebarOpen && <button className="prototype-sidebar-scrim" aria-label="Dismiss subjects" onClick={() => setSidebarOpen(false)} />}
     <div className="prototype-shell">
-      <aside className="prototype-sidebar"><div className="prototype-brand"><AudioLines size={23} /><strong>OutLoud</strong></div><nav aria-label="App navigation"><button className={screen !== 'chat' ? 'active' : ''} onClick={openHome}><BookOpen size={18} /><span>Study</span></button><button className={screen === 'chat' ? 'active' : ''} onClick={() => { setScreen('chat'); setAnswer(''); setFeedback(false); setRecording(false) }}><MessageSquare size={18} /><span>Chat</span></button></nav><div className="prototype-sidebar-subjects">{subjects.map(name => <button key={name} className={subject === name && screen !== 'chat' ? 'active' : ''} onClick={() => { setSubject(name); openHome() }}>{name}</button>)}<Button variant="ghost" onClick={() => setNewSubject(true)}><Plus size={16} /> New subject</Button></div><div className="prototype-sidebar-bottom"><Button variant="ghost" onClick={() => setSetup(true)} aria-label="Settings"><Settings2 size={17} /><span>Settings</span></Button></div></aside>
+      <aside className={`prototype-sidebar ${sidebarOpen ? 'sidebar-open' : ''}`} aria-label="Subjects and conversations">
+        <Button variant="ghost" className="prototype-sidebar-close" aria-label="Close subjects" onClick={() => setSidebarOpen(false)}><X size={17} /></Button>
+        <button className="prototype-brand" onClick={() => openSubject(subject.name)} disabled={recording}><AudioLines size={23} /><strong>OutLoud</strong></button>
+        <div className="prototype-sidebar-subjects">
+          {subjects.map(item => <section key={item.name} className="prototype-subject-group">
+            <div className={`prototype-group-heading ${subject.name === item.name ? 'active' : ''}`}>
+              <button aria-label={`${expanded.includes(item.name) ? 'Collapse' : 'Expand'} ${item.name}`} aria-expanded={expanded.includes(item.name)} onClick={() => setExpanded(previous => previous.includes(item.name) ? previous.filter(name => name !== item.name) : [...previous, item.name])}>{expanded.includes(item.name) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
+              <button className="prototype-group-name" onClick={() => openSubject(item.name)} disabled={recording} aria-current={subject.name === item.name && !current ? 'page' : undefined}><span>{item.name}</span><Folder size={15} /></button>
+            </div>
+            {expanded.includes(item.name) && <div className="prototype-group-conversations">
+              {conversations.filter(value => value.subject === item.name && value.saved).map(value => <button key={value.id} className={value.id === conversationId ? 'active' : ''} onClick={() => openConversation(value)} disabled={recording} aria-current={value.id === conversationId ? 'page' : undefined}>{value.title}</button>)}
+              <button onClick={() => createConversation(item.name)} disabled={recording}><Plus size={14} /> New conversation</button>
+            </div>}
+          </section>)}
+          <Button variant="ghost" onClick={() => setNewSubject(true)} disabled={recording}><Plus size={16} /> New subject</Button>
+        </div>
+        <div className="prototype-sidebar-bottom"><Button variant="ghost" onClick={() => setSetup(true)} aria-label="Settings"><Settings2 size={17} /><span>Settings</span></Button></div>
+      </aside>
       <main className="prototype-main">
-        {screen === 'home' ? <div className="prototype-home">{home}</div> : <div className="prototype-study">{screen === 'study' && studyHeader}<div className="prototype-study-body">{conversation}{variant === 'C' && screen === 'study' ? sourcePanel : null}</div>{composer}</div>}
+        {!current ? <div className="prototype-home">{home}</div> : <div className="prototype-study">
+          <header className="prototype-workspace-heading"><div><button onClick={() => openSubject(subject.name)} disabled={recording}>{subject.name}</button><h1>{current.title}</h1></div>{materialButton}</header>
+          <div className="prototype-workspace-controls">
+            <div className="prototype-mode-selector" role="group" aria-label="Conversation mode">{(['Study', 'Chat'] as Mode[]).map(mode => <button key={mode} aria-pressed={current.mode === mode} className={current.mode === mode ? 'active' : ''} disabled={recording} onClick={() => updateCurrent(value => ({ ...value, mode }))}>{mode}</button>)}</div>
+            <Button variant="ghost" onClick={() => { setTopicSelection(current.selectedTopics); setTopicPicker(true) }} disabled={recording}>Topics <span>{current.selectedTopics.length}</span><ChevronDown size={14} /></Button>
+            {current.selectedTopics.length > 0 && <label className="prototype-question-topic">Question topic<select aria-label="Question topic" value={current.activeTopic ?? ''} disabled={recording || !!current.draft.trim()} onChange={event => updateCurrent(value => ({ ...value, activeTopic: event.target.value, finished: false }))}>{current.selectedTopics.map(topic => <option key={topic}>{topic}</option>)}</select></label>}
+          </div>
+          {!!current.draft.trim() && current.selectedTopics.length > 1 && <p className="prototype-inline-note">Send or clear your draft before changing the question topic.</p>}
+          <div className="prototype-study-body"><div className="prototype-conversation">
+            {current.turns.map(turn => <article key={turn.id} className="prototype-turn" data-mode={turn.mode} data-topic={turn.topic ?? ''} data-assisted={turn.assisted}>
+              {turn.question && <blockquote className="prototype-saved-question">{turn.question}</blockquote>}
+              <section className="prototype-answer"><h3>{turn.mode === 'Study' ? `Your answer · ${turn.topic}` : 'Your message'}</h3><p>{turn.answer}</p></section>
+              <section className="prototype-feedback"><div className="prototype-feedback-heading"><AudioLines size={18} /><strong>{turn.mode === 'Study' ? 'Study feedback' : 'Chat response'}</strong></div>
+                {turn.failed ? <><p>Your answer is retained. Feedback failed; no assessment was updated.</p><Button variant="outline" onClick={() => updateCurrent(value => ({ ...value, turns: value.turns.map(item => item.id === turn.id ? { ...item, failed: false } : item) }))}>Retry feedback</Button></> : <>
+                  <p>{turn.reply}</p>
+                  {turn.mode === 'Study' && <div className="prototype-feedback-trust"><CircleHelp size={16} /><p>{turn.assisted ? 'Assisted attempt. Help was provided for this topic; this answer cannot establish independent understanding.' : 'Independent attempt.'} {turn.provisional ? 'Provisional: no verified applicable source support.' : 'Illustrative source support.'} No progress is updated in this demo.</p></div>}
+                  {turn.guidanceTopics.length > 0 && <p className="prototype-inline-note">Help provided for {turn.guidanceTopics.join(', ')}. Your next Study answer on that topic will be assisted.</p>}
+                </>}
+              </section>
+            </article>)}
+            {current.finished && current.mode === 'Study' ? <section className="prototype-summary"><Check size={18} /><div><h2>Study paused</h2><p>Your messages and draft stay in this subject. No assessment was recorded in the demo.</p><Button variant="outline" onClick={() => updateCurrent(value => ({ ...value, finished: false }))}>Resume</Button></div></section> : current.mode === 'Study' ? <section className="prototype-question">
+              {activeTopic ? <><h2>{current.questions[activeTopic.name]}</h2><div className="prototype-question-context">{status(activeTopic)}{current.assistedTopics.includes(activeTopic.name) && <span>Assisted attempt</span>}</div></> : <><h2>Select a topic to study</h2><Button variant="outline" onClick={() => { setTopicSelection(current.selectedTopics); setTopicPicker(true) }}>Select topics</Button></>}
+            </section> : !current.turns.length && <section className="prototype-question"><h2>What would you like to discuss?</h2></section>}
+            {!(current.finished && current.mode === 'Study') && current.activeTopic && <div className="prototype-feedback-actions">
+              <Button variant="outline" onClick={explain} disabled={!ready || recording}>Explain {current.activeTopic.toLowerCase()}</Button>
+              {current.mode === 'Study' && <><Button variant="outline" onClick={freshQuestion} disabled={recording || !!current.draft.trim() || !!studyTurn?.failed}>Practice this</Button><Button variant="ghost" onClick={() => updateCurrent(value => ({ ...value, finished: true }))} disabled={recording || !!studyTurn?.failed}>Finish studying</Button></>}
+            </div>}
+          </div>{variant === 'C' && <section className="prototype-source"><h3>Subject reference</h3><p>{subject.reference || 'No approved reference yet.'}</p>{materialButton}</section>}</div>
+          <div className="prototype-composer-dock">{!ready && warning}<div className="prototype-composer">
+            <label className="sr-only" htmlFor="prototype-composer">Your message</label><Textarea id="prototype-composer" value={current.draft} onChange={event => updateCurrent(value => ({ ...value, draft: event.target.value }))} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() } }} placeholder={current.mode === 'Study' ? 'Explain it in your own words…' : 'Message OutLoud…'} />
+            <div className="prototype-composer-toolbar"><span>Gemma 3:4b</span><Button variant={recording ? 'destructive' : 'ghost'} onClick={toggleRecording} disabled={!recording && (!ready || (current.finished && current.mode === 'Study'))} aria-label={recording ? 'Stop demo recording' : 'Start demo recording'}>{recording ? <Square size={17} /> : <Mic size={17} />}{recording ? 'Stop' : 'Dictate'}</Button><Button onClick={send} disabled={!ready || recording || !current.draft.trim() || (current.mode === 'Study' && (current.finished || !current.activeTopic))} aria-label="Send message"><ArrowRight size={17} /> Send</Button></div>
+          </div><div className="prototype-composer-note"><span>{recording ? 'Simulated capture · Stop inserts example dictation' : 'Enter to send · Shift+Enter for a new line'}</span><button onClick={() => setDetails('evidence')}>Assessment evidence</button></div></div>
+        </div>}
       </main>
     </div>
     <div className="prototype-switcher"><button aria-label="Previous layout" onClick={() => cycle(-1)}><ArrowLeft size={16} /></button><span>{variant} · {variants[variant]}</span><button aria-label="Next layout" onClick={() => cycle(1)}><ArrowRight size={16} /></button><select aria-label="Demo scenario" value={readiness} onChange={event => { setReadiness(event.target.value as Readiness); setProgress(0); setRecording(false) }}><option value="ready">Normal</option><option value="missing">First launch</option><option value="downloading">Download in progress</option><option value="error">Download failed</option><option value="offline">Backend offline</option></select><label><input type="checkbox" checked={provisional} onChange={event => setProvisional(event.target.checked)} /> Provisional</label><label><input type="checkbox" checked={feedbackFailed} onChange={event => setFeedbackFailed(event.target.checked)} /> Feedback failed</label><details className="prototype-state"><summary>Inspect demo state</summary><pre>{JSON.stringify(state, null, 2)}</pre></details></div>
-    {newSubject && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="new-subject-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close subject editor" onClick={() => setNewSubject(false)}><X /></Button><h2 id="new-subject-title">New subject</h2><form onSubmit={event => { event.preventDefault(); const name = subjectName.trim(); if (!name) return; setSubjects(previous => [...previous, name]); setSubject(name); setSubjectTopics(previous => ({ ...previous, [name]: topicNames.split('\n').map(name => name.trim()).filter(Boolean).map(name => ({ name, status: 'Not assessed', weight: null, evidence: 0 })) })); setNewSubject(false); setSubjectName(''); setTopicNames('') }}><label htmlFor="prototype-subject-name">Subject name</label><Input id="prototype-subject-name" value={subjectName} onChange={event => setSubjectName(event.target.value)} placeholder="e.g. Database Management Systems" required /><label htmlFor="prototype-topic-names">Topics, one per line</label><Textarea id="prototype-topic-names" value={topicNames} onChange={event => setTopicNames(event.target.value)} placeholder={'Normalization\nTransactions\nIndexing'} /><Button type="submit" disabled={!subjectName.trim()}>Create subject</Button></form></section></div>}
-    {setup && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="setup-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close setup" onClick={() => setSetup(false)}><X /></Button><h2 id="setup-title">Settings</h2><p>The installer won’t include large models. Review the download before starting. This panel simulates setup; it does not download anything.</p><div className="prototype-setup-step"><AudioLines size={18} /><div><strong>Whisper transcription</strong><small>Local dictation model · downloaded with consent</small></div></div><div className="prototype-setup-step"><BookOpen size={18} /><div><strong>Gemma 3:4b via Ollama</strong><small>Local study feedback · large download. Exact size checked at setup.</small></div></div>{readiness === 'downloading' && <><progress aria-label="Simulated model download" max={100} value={progress} /><p>{progress}% · simulated download{progress === 100 ? ' complete; verification required' : ''}</p></>}{readiness === 'error' && <p role="alert">Download interrupted. Saved subjects and progress are unaffected.</p>}<div className="prototype-modal-actions">{readiness === 'downloading' ? <><Button variant="outline" onClick={() => setReadiness('missing')}>Cancel download</Button>{progress === 100 && <Button onClick={() => setReadiness('ready')}>Simulate successful verification</Button>}</> : <Button onClick={() => { setProgress(0); setReadiness('downloading') }}><ArrowDownToLine size={16} />{readiness === 'error' ? 'Retry demo download' : 'Consent & simulate download'}</Button>}<Button variant="ghost" onClick={() => setSetup(false)}>Set up later</Button></div></section></div>}
-    {(showEvidence || showMaterials) && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="detail-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close details" onClick={() => { setShowEvidence(false); setShowMaterials(false) }}><X /></Button><h2 id="detail-title">{showMaterials ? 'Syllabus and references' : 'Assessment evidence'}</h2>{showMaterials ? <><p>A syllabus defines topics. References support feedback. Neither is used until you approve the reviewed content.</p><label htmlFor="prototype-reference">Reviewed reference text</label><Textarea id="prototype-reference" value={reference} onChange={event => { setReference(event.target.value); setReviewed(false) }} /><p>{reviewed ? 'Approved · simulated source' : 'Pending review · feedback will be provisional'}</p><Button onClick={() => setReviewed(true)} disabled={!reference.trim()}>Approve reviewed excerpt</Button></> : <><p><strong>Normalization · needs revision</strong></p><p>Sample evidence from two independent attempts. This is an illustrative fixture, not a live judgment.</p><blockquote>“I would keep a department’s name in the employee table and change each row when it changes.”</blockquote><p>The cited reference describes dependencies and update anomalies. The learner’s answer needs a fresh supported reassessment.</p><p className="prototype-muted">Assessed coverage is separate from demonstrated understanding. An untested topic is not an established gap.</p></>}</section></div>}
+    {newSubject && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="new-subject-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close subject editor" onClick={() => setNewSubject(false)}><X /></Button><h2 id="new-subject-title">New subject</h2><form onSubmit={event => { event.preventDefault(); const name = newSubjectName.trim(); if (!name || subjects.some(item => item.name === name)) return; setSubjects(previous => [...previous, { name, reference: '', approved: false, topics: [...new Set(newTopics.split('\n').map(item => item.trim()).filter(Boolean))].map(topic => ({ name: topic, status: 'Not assessed', weight: null, evidence: 0 })) }]); openSubject(name); expandSubject(name); setNewSubject(false); setNewSubjectName(''); setNewTopics('') }}><label htmlFor="prototype-subject-name">Subject name</label><Input id="prototype-subject-name" value={newSubjectName} onChange={event => setNewSubjectName(event.target.value)} placeholder="e.g. Computer Networks" required /><label htmlFor="prototype-topic-names">Topics, one per line</label><Textarea id="prototype-topic-names" value={newTopics} onChange={event => setNewTopics(event.target.value)} placeholder={'Routing\nTCP'} />{subjects.some(item => item.name === newSubjectName.trim()) && <p role="alert">That subject already exists.</p>}<Button type="submit" disabled={!newSubjectName.trim() || subjects.some(item => item.name === newSubjectName.trim())}>Create subject</Button></form></section></div>}
+    {topicPicker && current && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="topics-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close topic selector" onClick={() => setTopicPicker(false)}><X /></Button><h2 id="topics-title">Topics</h2><div className="prototype-topic-options">{subject.topics.map(topic => <label key={topic.name}><input type="checkbox" checked={topicSelection.includes(topic.name)} onChange={event => setTopicSelection(previous => event.target.checked ? [...previous, topic.name] : previous.filter(item => item !== topic.name))} />{topic.name}</label>)}{!subject.topics.length && <p>This subject has no topics yet. You can still use Chat.</p>}</div>{topicChangeBlocked && <p role="alert">Send or clear your draft before removing its question topic.</p>}<Button onClick={applyTopics} disabled={topicChangeBlocked}>Apply topics</Button></section></div>}
+    {setup && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="setup-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close setup" onClick={() => setSetup(false)}><X /></Button><h2 id="setup-title">Settings</h2><p>Model downloads need consent. This panel simulates setup and does not download anything.</p><div className="prototype-setup-step"><AudioLines size={18} /><div><strong>Whisper transcription</strong><small>Local dictation model</small></div></div><div className="prototype-setup-step"><BookOpen size={18} /><div><strong>Gemma 3:4b via Ollama</strong><small>Study and Chat · exact download size checked at setup</small></div></div>{readiness === 'downloading' && <><progress aria-label="Simulated model download" max={100} value={progress} /><p>{progress}% · simulated download{progress === 100 ? ' complete; verification required' : ''}</p></>}{readiness === 'error' && <p role="alert">Download interrupted. Saved subjects and conversations are unaffected.</p>}<div className="prototype-modal-actions">{readiness === 'downloading' ? <><Button variant="outline" onClick={() => setReadiness('missing')}>Cancel download</Button>{progress === 100 && <Button onClick={() => setReadiness('ready')}>Simulate successful verification</Button>}</> : <Button onClick={() => { setProgress(0); setReadiness('downloading') }}><ArrowDownToLine size={16} />{readiness === 'error' ? 'Retry demo download' : 'Consent & simulate download'}</Button>}<Button variant="ghost" onClick={() => setSetup(false)}>Set up later</Button></div></section></div>}
+    {details && <div className="prototype-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="detail-title" className="prototype-modal"><Button variant="ghost" className="prototype-modal-close" aria-label="Close details" onClick={() => setDetails(null)}><X /></Button><h2 id="detail-title">{details === 'materials' ? 'Syllabus and references' : 'Assessment evidence'}</h2>{details === 'materials' ? <><p>Shared by conversations in {subject.name}. Only reviewed, approved references can support assessments.</p><label htmlFor="prototype-reference">Reference text</label><Textarea id="prototype-reference" value={subject.reference} onChange={event => setSubjects(previous => previous.map(item => item.name === subject.name ? { ...item, reference: event.target.value, approved: false } : item))} /><p>{subject.approved ? 'Approved · demo source' : 'Pending review'}</p><Button onClick={() => setSubjects(previous => previous.map(item => item.name === subject.name ? { ...item, approved: true } : item))} disabled={!subject.reference.trim()}>Approve reviewed excerpt</Button></> : <><p>Assessed coverage and demonstrated understanding are separate. These demo attempts do not change saved progress.</p>{conversations.filter(item => item.subject === subject.name).flatMap(item => item.turns.filter(turn => turn.mode === 'Study').map(turn => <article key={turn.id} className="prototype-evidence-item"><strong>{item.title} · {turn.topic}</strong><p>{turn.assisted ? 'Assisted' : 'Independent'} · {turn.failed ? 'Feedback failed' : turn.provisional ? 'Provisional feedback' : 'Illustrative source support'}</p><blockquote>{turn.answer}</blockquote></article>))}</>}</section></div>}
   </div>
 }

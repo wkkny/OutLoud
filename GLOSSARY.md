@@ -19,10 +19,16 @@ _Avoid_: Owner tab
 ## Study
 
 **Subject**:
-An area the learner is studying, such as DBMS.
+An area the learner is studying, such as DBMS, that groups its topics, study material and related conversations. It supplies shared subject context to those conversations.
 
 **Topic**:
 A named part of a subject that the learner intends to study, such as normalization within DBMS.
+
+**Study mode**:
+A question-led conversation mode in which answers can supply assessment evidence for a subject's topics.
+
+**Chat mode**:
+An open-ended conversation mode for discussion without automatic topic assessment.
 
 **Syllabus**:
 The learner-supplied list of topics that defines the scope of study for a subject.

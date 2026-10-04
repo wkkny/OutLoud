@@ -1,0 +1,7 @@
+# Subjects share context; conversation turns retain their meaning
+
+For the packaged Study release, a subject groups multiple independent conversations and supplies their topics, approved materials and learning progress, without merging sibling message histories or drafts. Study and Chat are selectable modes of one conversation workspace, rather than separate destinations; a conversation can select several topics, but an assessed answer belongs to a specific topic and question. This replaces the current one-topic-per-study-conversation restriction while preserving independent conversation identity from ADR 0001.
+
+Switching modes or topic scope must not reinterpret earlier messages, accepted requests or retries. Preserve the mode, topic/question and applicable support context associated with an accepted turn; Chat messages are not retroactively assessed, and relevant explanations or hints delivered in Chat make the corresponding Study attempt assisted. Merely switching modes is not assistance, and an assisted attempt must not permanently prevent subsequent independent attempts. This avoids gaining apparent independent understanding by toggling a mode or retrying, at the cost of explicit per-turn context and guidance tracking.
+
+This is a confirmed release-design decision. The in-memory prototype demonstrates the interaction; production persistence, migration, reference applicability and delivered-guidance tracking remain to be implemented and tested. Do not copy the prototype's keyword-based guidance simulation into production.

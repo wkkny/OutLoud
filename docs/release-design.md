@@ -23,7 +23,7 @@ Desktop owns its backend and separate per-user saved data (ADR 0002 on main). Pa
 
 ## Confirmed experience and distribution
 
-- Opening the app shows a Study home with subjects, Resume studying, and revision priorities. Ordinary Chat remains a separate sidebar destination; returning learners can resume their last topic without repeating setup.
+- Opening the app shows a Study home with subjects, Resume studying, and revision priorities. Study and Chat are selectable modes in one conversation workspace, not separate sidebar destinations. This supersedes the earlier separate-Chat navigation decision. Returning learners can resume their last topic without repeating setup.
 - Model setup can be postponed. Users can explore, create subjects, and enter topics manually before models are ready. Model-dependent actions explain what is missing at the affected action and link to Settings. Do not add global readiness badges or banners.
 - Downloads require consent, show progress, and can be retried. Backend connectivity alone does not establish model readiness.
 - One focused study workspace combines topic/progress context, the current question, conversation, and the shared voice/text composer. Detailed evidence and subject management use expandable panels.
@@ -31,6 +31,16 @@ Desktop owns its backend and separate per-user saved data (ADR 0002 on main). Pa
 - Preserve existing desktop conversations and study progress with tested schema upgrades. Browser-development data import is outside this release; do not silently combine the separate stores.
 - Validate Apple Silicon first. Intel installer validation and automatic updates are outside this release.
 - Produce an installable build early, but require signing and notarization before distributing it to nontechnical testers. Security workarounds are not the intended installation experience.
+
+## Subject grouping refinement
+
+The learner wants each subject to be the sidebar group/folder, with multiple conversations listed beneath it. Keep Subject as the domain term; folder describes the presentation, not a separate entity. Subject context and available topics belong to the subject so new conversations do not require repeated setup. Conversations select their topic focus from that subject.
+
+The learner accepted one or several selected topics per conversation, with each assessed answer tied to a specific topic. Conversations share the subject's topics, approved materials and progress, but keep independent message histories and drafts. They do not automatically consume all sibling conversation transcripts.
+
+Study and Chat should be modes of the same workspace, using one composer rather than separate components/pages. Confirmed switching behavior preserves the conversation, draft and saved study question; previous messages retain their original mode and Chat messages are not retroactively assessed. The learner confirmed that relevant explanations or hints received in Chat make the corresponding Study attempt assisted. Merely switching modes does not. A fresh independent attempt remains possible after that assisted attempt; assistance must not become a permanent penalty.
+
+The existing backend already supplies subject material/progress to study conversations, but each conversation is currently bound to one topic. The revised prototype demonstrates nested conversation navigation, multiple selected topics and mode transitions with in-memory data. Production needs explicit persistence, request-context snapshots, source applicability and delivered-guidance tracking; the throwaway demo is not that implementation. Preserve the minimal B direction, bottom Settings and stable selection layout.
 
 ## Remaining empirical questions
 
