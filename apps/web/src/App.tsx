@@ -24,6 +24,8 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { StudyArea } from '@/components/study-area'
+import { getStudySession, judgmentLabels, type StudySession, type StudyAction } from '@/lib/study'
 import './chat-ui.css'
 
 export default function App() {
@@ -40,6 +42,14 @@ function ChatApp() {
   const selected = selectedId ? details[selectedId] : undefined
   const draft = selectedId ? drafts[selectedId] : undefined
   const chat = useChat(dictation.sessionId, selectedId, details, historyRevisions, library)
+  const [studyOpen, setStudyOpen] = useState(false)
+  const [loadedStudySession, setStudySession] = useState<StudySession | null>(null)
+  useEffect(() => {
+    let active = true
+    if (selectedId) void getStudySession(selectedId).then(session => { if (active) setStudySession(session) }).catch(() => { /* Ordinary chat remains usable if study metadata is unavailable. */ })
+    return () => { active = false }
+  }, [selectedId, historyRevisions])
+  const studySession = loadedStudySession?.conversation_id === selectedId ? loadedStudySession : null
   const [sending, setSending] = useState(false)
   const [creating, setCreating] = useState(false)
   const pendingCreation = useRef<Promise<string | null> | null>(null)
@@ -76,14 +86,14 @@ function ChatApp() {
     return task
   }
   const ensureConversation = async () => selectedId ?? createChat()
-  const send = async (retry?: PendingSend) => {
-    if (retry ? !canRetry || (retry.conversationId !== null && retry.conversationId !== selectedId) : !canSend) return
-    const text = retry?.text ?? composerText
-    const attempt = chat.prepare(selectedId, text, retry)
+  const send = async (retry?: PendingSend, command?: { text: string; action: StudyAction }) => {
+    if (command ? !canRetry || !selectedId : retry ? !canRetry || (retry.conversationId !== null && retry.conversationId !== selectedId) : !canSend) return
+    const text = command?.text ?? retry?.text ?? composerText
+    const attempt = chat.prepare(selectedId, text, retry, command?.action)
     setSending(true)
     let started = false
     try {
-      if (selectedId && unscopedDraft) {
+      if (!command && selectedId && unscopedDraft) {
         library.edit(selectedId, composerText)
         editUnscopedDraft('')
       }
@@ -92,28 +102,30 @@ function ChatApp() {
       chat.attach(attempt.id, id)
       if (!await library.save(id) || !mounted.current) return
       // An append/conflict during saving must be reviewed before sending.
-      if (!retry && library.getSnapshot().drafts[id]?.text !== text) return
+      if (!retry && !command && library.getSnapshot().drafts[id]?.text !== text) return
       started = true
-      void chat.send(id, text, () => { void library.clearAccepted(id, text) }, attempt.id)
+      void chat.send(id, text, () => { if (!command) void library.clearAccepted(id, text) }, attempt.id, attempt.studyAction)
     } finally { if (!started) chat.fail(attempt.id); setSending(false) }
   }
 
   return <TooltipProvider><SidebarProvider className="chat-app">
-    <AppSidebar library={library} list={list} selectedId={selectedId} connected={connected} loading={conversations.loading} creating={creating} onCreate={() => void createChat()} />
+    <AppSidebar library={library} list={list} selectedId={selectedId} connected={connected} loading={conversations.loading} creating={creating} onStudy={() => setStudyOpen(true)} onChat={() => setStudyOpen(false)} onCreate={() => { setStudyOpen(false); void createChat() }} />
     <SidebarInset className="chat-main">
       <header className="chat-topbar">
         <div className="chat-heading flex min-w-0 items-center gap-3">
           <SidebarTrigger className="chat-sidebar-toggle" />
-          {selected && <><Separator orientation="vertical" className="h-5" /><div className="truncate text-sm font-medium">{selected.title}</div></>}
+          {selected && !studyOpen && <><Separator orientation="vertical" className="h-5" /><div className="truncate text-sm font-medium">{selected.title}</div></>}
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {studyOpen && recording && <Button variant="destructive" size="sm" onClick={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')}>Stop recording</Button>}
           <Badge variant={connected ? 'secondary' : 'outline'} role="status" className="connection-status">{connected ? 'Connected · local' : dictation.connection === 'exhausted' ? 'Connection retries exhausted' : dictation.connection === 'retrying' ? 'Reconnecting with backoff…' : 'Connecting…'}</Badge>
           {!connected && <Button variant="ghost" size="icon-sm" aria-label="Reconnect" disabled={dictation.safety === 'stopping'} onClick={dictation.reconnect}><RefreshCw /></Button>}
-          {selected && <ConversationActions key={selected.id} conversation={selected} library={library} enabled={connected} />}
+          {selected && !studyOpen && <ConversationActions key={selected.id} conversation={selected} library={library} enabled={connected} />}
         </div>
       </header>
-      <div className="chat-content">
+      {studyOpen ? <StudyArea library={library} connected={connected} sessionId={dictation.sessionId} onOpenConversation={() => setStudyOpen(false)} /> : <div className="chat-content">
         <div className="session-alerts">
+          {studySession && <section className="study-session" aria-label="Study topic"><div className="study-actions"><strong>{studySession.subject.name} · {studySession.topic.name}</strong><Button size="sm" variant="ghost" onClick={() => setStudyOpen(true)}>View study progress</Button></div><p>{judgmentLabels[studySession.topic.judgment]} · Exam importance: {studySession.topic.weight === null ? 'Unknown' : `${studySession.topic.weight}%`}</p><p>{studySession.finished ? 'Study summary saved. Choose a topic or practice again when ready.' : studySession.question}</p>{Boolean(studySession.hinted) && <p>Answer after guidance · a fresh independent question is needed for reassessment.</p>}<div className="study-actions"><Button size="sm" variant="outline" disabled={!canRetry} onClick={() => void send(undefined, { text: 'Explain the gap in my understanding.', action: 'explain' })}>Explain this</Button><Button size="sm" variant="outline" disabled={!canRetry} onClick={() => void send(undefined, { text: 'Give me a fresh practice question.', action: 'practice' })}>Practice this</Button><Button size="sm" variant="ghost" onClick={() => setStudyOpen(true)}>Move on</Button><Button size="sm" variant="ghost" disabled={!canRetry} onClick={() => void send(undefined, { text: 'Summarize my study progress and revision priorities.', action: 'finish' })}>Finish studying</Button>{selected?.messages.at(-1)?.status === 'failed' && <Button size="sm" variant="outline" disabled={!canRetry} onClick={() => { const answer = selected.messages.findLast(message => message.role === 'user'); if (answer) void send(undefined, { text: answer.content, action: 'answer' }) }}>Retry feedback</Button>}</div></section>}
           {dictation.safety !== 'none' && <Alert variant={dictation.safety === 'unconfirmed' ? 'destructive' : 'default'}>
             <AlertTitle>{dictation.safety === 'stopping' ? 'Stopping recording safely…' : dictation.safety === 'unconfirmed' ? 'Recording stop is unconfirmed' : 'Backend confirmed this tab’s recording stopped'}</AlertTitle>
             <AlertDescription>{dictation.safety === 'unconfirmed' ? 'Check or restart the backend. Reconnect will verify this client has released capture before starting a new session.' : 'Checking this tab’s capture only; other tabs may stay connected.'}</AlertDescription>
@@ -123,15 +135,15 @@ function ChatApp() {
         <section className="conversation" aria-label="Conversation">
           {!chat.messages.length ? <Empty className="empty-conversation">
             <EmptyHeader className="max-w-md">
-              <EmptyTitle><h1 className="text-2xl font-semibold tracking-tight">What can I help with?</h1></EmptyTitle>
-              <EmptyDescription>Speak naturally or type a message. Review your words, then send them to Gemma.</EmptyDescription>
+              <EmptyTitle><h1 className="text-2xl font-semibold tracking-tight">{studySession ? `Let's study ${studySession.topic.name}` : 'What can I help with?'}</h1></EmptyTitle>
+              <EmptyDescription>{studySession ? 'Start with your own explanation. Speak or type, review your answer, then send it.' : 'Speak naturally or type a message. Review your words, then send them to Gemma.'}</EmptyDescription>
             </EmptyHeader>
-            <EmptyContent className="max-w-md"><ChatSuggestions enabled={Boolean(!composerText && (!selectedId || draft) && (!draft || draft.conflict === null) && connected && !creating)} onSelect={(prompt) => {
+            <EmptyContent className="max-w-md">{!studySession && <ChatSuggestions enabled={Boolean(!composerText && (!selectedId || draft) && (!draft || draft.conflict === null) && connected && !creating)} onSelect={(prompt) => {
               if (composerText || (draft && draft.conflict !== null)) return
               if (selectedId && draft) library.edit(selectedId, prompt)
               else if (!selectedId) editUnscopedDraft(prompt)
               document.getElementById('composer')?.focus()
-            }} /></EmptyContent>
+            }} />}</EmptyContent>
           </Empty> : <MessageScrollerProvider key={selectedId}>
             <MessageScroller>
               <MessageScrollerViewport aria-label="Conversation messages">
@@ -182,7 +194,7 @@ function ChatApp() {
           {chat.busy && !chat.ownedBusy && <p role="status" className="capacity-note">This conversation is generating in another tab. Wait for its reply before sending.</p>}
           {recording && dictation.snapshot?.conversation_id !== selectedId && <p role="status" className="capacity-note">Recording stays bound to its original conversation; switching does not move dictated text.</p>}
         </div>
-      </div>
+      </div>}
     </SidebarInset>
   </SidebarProvider></TooltipProvider>
 }
