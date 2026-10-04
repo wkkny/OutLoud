@@ -21,6 +21,9 @@ function chatDescription(error: string) {
 }
 
 function recordingDescription(error: string) {
+  if (error === 'Microphone permission denied.') return 'Allow microphone access in your computer’s settings, then close and reopen OutLoud.'
+  if (error === 'Microphone permission restricted.') return 'Microphone access is restricted by your computer’s policy. Ask your administrator to allow it.'
+  if (error === 'Could not check microphone permission.') return 'OutLoud could not check microphone access. Close and reopen the app, then try again.'
   if (error.startsWith('Recording failed:') && error.endsWith('Check your microphone or permissions and retry.')) return "Check your microphone and allow microphone access in your computer's settings, then try again."
   if (error.startsWith('Microphone is occupied')) return 'The microphone is already in use. Stop the current recording before starting another.'
   if (error.startsWith('Transcription capacity is full.')) return 'OutLoud is busy with other recordings. Try again in a moment.'
@@ -40,10 +43,11 @@ type NotificationsState = {
   library: ConversationLibrary
   libraryError: string | null
   recordingError: string | null
+  recordingAttempt: number
 }
 
 /** Each condition owns one toast until it resolves, even if the user dismisses it. */
-export function useNotifications({ connection, safety, reconnect, selectedId, chatError, capacityFull, draftError, library, libraryError, recordingError }: NotificationsState) {
+export function useNotifications({ connection, safety, reconnect, selectedId, chatError, capacityFull, draftError, library, libraryError, recordingError, recordingAttempt }: NotificationsState) {
   const managedBackend = window.outloudDesktop?.managedBackend === true
   const { add, close, update } = useToastManager()
   const notices = useRef(new Map<string, { id: string | null; dismissed: boolean; identity: string | null }>())
@@ -81,6 +85,12 @@ export function useNotifications({ connection, safety, reconnect, selectedId, ch
   const restored = useEffectEvent(() => {
     add({ title: 'Connected again', type: 'success' })
   })
+  const openMicrophoneSettings = useEffectEvent(async () => {
+    try { await window.outloudDesktop?.openMicrophoneSettings() }
+    catch {
+      add({ title: 'Couldn’t open microphone settings', description: 'Open your computer’s privacy settings and allow microphone access, then close and reopen OutLoud.', type: 'error', timeout: 0 })
+    }
+  })
 
   useEffect(() => {
     const scope = selectedId
@@ -91,8 +101,10 @@ export function useNotifications({ connection, safety, reconnect, selectedId, ch
     if (connection !== 'connected' && recordingError) { hide('recording'); return }
     sync('recording', recordingError ? {
       title: 'Recording needs attention', description: recordingDescription(recordingError), type: 'error', timeout: 0,
-    } : null, recordingError)
-  }, [recordingError, connection])
+      actionProps: managedBackend && (recordingError === 'Microphone permission denied.' || recordingError.startsWith('Recording failed:'))
+        ? { children: 'Open microphone settings', onClick: () => { void openMicrophoneSettings() } } : undefined,
+    } : null, recordingError ? `${recordingAttempt}:${recordingError}` : null)
+  }, [recordingError, recordingAttempt, connection, managedBackend])
 
   useEffect(() => {
     if (connection !== 'connected' && libraryError) { hide('library'); return }

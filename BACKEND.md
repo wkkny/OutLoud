@@ -75,6 +75,14 @@ or competing capture returns 409. Invalid/expired tokens return 403, invalid bod
 422, unavailable workers 503, and full transcription capacity 429. Stops need no new
 transcription slot.
 
+During capture, the initiating client receives `recording.level` events with the
+`recording_id` and a normalized RMS `level` between 0 and 1. Levels come from the
+same microphone samples saved to disk; the UI does not open another microphone.
+This is transient, throttled telemetry, not saved data or a state revision. Slow
+clients receive the latest level without filling their reliable event buffer.
+The UI ignores levels from other recordings and clears the meter on stop,
+disconnect, or missing updates.
+
 Completed transcripts enter the durable inbox in `recordings/delivery.sqlite3`.
 Before live delivery or replay, the backend atomically appends text to the original
 conversation's draft and records its recording ID in the conversation database.

@@ -9,10 +9,12 @@ export type Safety = 'none' | 'stopping' | 'stopped' | 'unconfirmed'
 type SessionEvents = {
   connectionChanged: (connection: Connection) => void
   snapshotChanged: (snapshot: Snapshot | null) => void
+  levelChanged: (level: number) => void
   conversationChanged: (id: string) => Promise<boolean>
   connected: () => void
   errorChanged: (error: string | null) => void
   pendingCommandsChanged: (pending: boolean) => void
+  recordingAttempted: () => void
   safetyChanged: (safety: Safety) => void
 }
 const BACKOFF = [500, 1000, 2000, 4000]
@@ -28,6 +30,8 @@ export class DictationSession {
   private epoch = 0
   private failures = 0
   private latestRevision = -1
+  private recordingId: string | null = null
+  private levelTimer: ReturnType<typeof setTimeout> | null = null
   private pending = false
   private acknowledgements = new Map<string, string>()
   private acknowledgementsInFlight = new Set<string>()
@@ -48,6 +52,7 @@ export class DictationSession {
       if (this.timer) clearTimeout(this.timer)
       this.heartbeat?.stop()
       this.socket?.close(); this.sessionId = null
+      this.clearLevel()
       document.removeEventListener('visibilitychange', resume)
       window.removeEventListener('pageshow', resume)
     }
@@ -93,7 +98,11 @@ export class DictationSession {
         this.events.connected()
         this.flushAcknowledgements()
       } else if (event.type === 'state.updated') this.applySnapshot(event.state)
-      else if (event.type === 'session.pong') this.heartbeat?.pong(event.id)
+      else if (event.type === 'recording.level' && event.recording_id === this.recordingId) {
+        if (this.levelTimer) clearTimeout(this.levelTimer)
+        this.events.levelChanged(event.level)
+        this.levelTimer = setTimeout(() => { this.levelTimer = null; this.events.levelChanged(0) }, 400)
+      } else if (event.type === 'session.pong') this.heartbeat?.pong(event.id)
       else if (event.type === 'conversation.updated') void this.events.conversationChanged(event.conversation_id)
       else if (event.type === 'transcription.completed' && event.conversation_id) {
         const id = event.conversation_id
@@ -116,8 +125,19 @@ export class DictationSession {
     socket.onclose = () => { if (epoch === this.epoch) void this.lost('Connection lost. Local edits are retained.') }
     socket.onerror = () => { if (epoch === this.epoch) void this.lost('Could not connect to the local backend.') }
   }
+  private clearLevel() {
+    if (this.levelTimer) clearTimeout(this.levelTimer)
+    this.levelTimer = null
+    this.recordingId = null
+    this.events.levelChanged(0)
+  }
   private applySnapshot(snapshot: Snapshot) {
     if (snapshot.revision >= this.latestRevision) {
+      const recordingId = snapshot.recording && snapshot.capture_owned ? snapshot.recording_id : null
+      if (recordingId !== this.recordingId) {
+        this.clearLevel()
+        this.recordingId = recordingId
+      }
       this.latestRevision = snapshot.revision; this.events.snapshotChanged(snapshot)
     }
   }
@@ -129,6 +149,7 @@ export class DictationSession {
     this.heartbeat?.stop(); this.heartbeat = null
     this.oldSessionId = this.sessionId ?? this.oldSessionId
     this.sessionId = null
+    this.clearLevel()
     this.events.snapshotChanged(null)
     this.events.errorChanged(message)
     this.socket?.close()
@@ -149,6 +170,8 @@ export class DictationSession {
     if (this.timer) clearTimeout(this.timer)
     this.epoch++; this.heartbeat?.stop(); this.socket?.close()
     this.oldSessionId = this.sessionId ?? this.oldSessionId; this.sessionId = null
+    this.clearLevel()
+    this.events.snapshotChanged(null)
     this.failures = 0
     void this.connect()
   }
@@ -169,7 +192,24 @@ export class DictationSession {
     const token = this.sessionId
     if (!token || this.pending) return false
     this.pending = true; this.events.pendingCommandsChanged(true)
+    if (action === 'start') {
+      this.events.recordingAttempted()
+      this.events.errorChanged(null)
+    }
     try {
+      if (action === 'start' && window.outloudDesktop?.managedBackend) {
+        let access: Awaited<ReturnType<typeof window.outloudDesktop.requestMicrophoneAccess>>
+        try { access = await window.outloudDesktop.requestMicrophoneAccess() }
+        catch {
+          if (this.mounted && this.sessionId === token) this.events.errorChanged('Could not check microphone permission.')
+          return false
+        }
+        if (!this.mounted || this.sessionId !== token) return false
+        if (access !== 'granted' && access !== 'system-managed') {
+          this.events.errorChanged(access === 'denied' ? 'Microphone permission denied.' : access === 'restricted' ? 'Microphone permission restricted.' : 'Could not check microphone permission.')
+          return false
+        }
+      }
       const response = await fetch(`${HTTP_URL}/recording/${action}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': token },
         body: action === 'start' ? JSON.stringify({ conversation_id: conversationId }) : undefined,

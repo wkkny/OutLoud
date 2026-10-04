@@ -1,7 +1,7 @@
 import queue
 import time
 
-from .recording import Recorder
+from .recording import Recorder, is_valid_level
 from .capacity import CapacityUnavailable
 from .shortcuts import Controls
 from .transcription import enqueue_recording
@@ -13,6 +13,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
     last_state = None
     pressed_sources = set()
     recording_id = None
+    next_level_at = 0.0
 
     def notify(event):
         if on_event is not None:
@@ -24,10 +25,11 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
             enqueue_recording(recordings, path, **context, on_event=notify)
 
     def start_recording():
-        nonlocal recording_id
+        nonlocal recording_id, next_level_at
         reserve()
         recorder.start()
         recording_id = recorder.path.parent.name
+        next_level_at = 0.0
 
     def stop_recording():
         nonlocal recording_id
@@ -51,6 +53,20 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
         if state != last_state:
             last_state = state
             notify({"type": "recording.state", **state})
+
+    def publish_level():
+        nonlocal next_level_at
+        read_level = getattr(recorder, "read_level", None)
+        if not controls.recording or not callable(read_level) or not isinstance(recording_id, str) or not recording_id:
+            return
+        now = time.monotonic()
+        if now < next_level_at:
+            return
+        next_level_at = now + 0.05
+        level = read_level()
+        if is_valid_level(level):
+            notify({"type": "recording.level", "recording_id": recording_id,
+                    "session_id": context["session_id"], "level": float(level)})
 
     def recover(error):
         # A failed start can leave a source marked down even though capture has
@@ -139,6 +155,7 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
                     pressed_sources.clear()
                 recover(error)
             publish_state()
+            publish_level()
             if isinstance(event, dict):
                 notify({"type": "recording.command_completed", "session_id": event["session_id"]})
     finally:
@@ -147,4 +164,3 @@ def recording_worker(events, recordings, on_event=None, recorder=None, *, reserv
         except Exception as error:
             recover(error)
         publish_state()
-

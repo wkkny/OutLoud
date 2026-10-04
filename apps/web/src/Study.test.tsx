@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
-import { backendFixture, FakeSocket } from './test/backend-fixture'
+import { backendFixture, FakeSocket, initialState } from './test/backend-fixture'
 
 let backend: ReturnType<typeof backendFixture>
 beforeEach(() => { sessionStorage.clear(); localStorage.clear(); backend = backendFixture(); vi.stubGlobal('WebSocket', FakeSocket); vi.stubGlobal('fetch', backend.fetchMock) })
@@ -38,7 +38,7 @@ it('creates a study subject with exam setup and unassessed syllabus coverage', a
   expect(backend.requests.filter(request => request.path === '/chat')).toHaveLength(0)
 })
 
-it('keeps dictated study answers in the reviewed draft until the learner sends', async () => {
+it('shows study recording levels and keeps dictated answers for review before Enter sends', async () => {
   const topic = { id: 'topic-1', name: 'Normalization', coverage: '', weight: null, active: 1, revision: 1, judgment: 'not_assessed', assessment: null, history: [], needs_reassessment: false }
   const subject = { id: 'subject-1', name: 'DBMS', exam_type: 'written', level: '', exam_date: '', topics: [topic], uploads: [], revision_order: ['topic-1'], coverage: { total: 1, assessed: 0, demonstrated: 0 } }
   const baseFetch = backend.fetchMock.getMockImplementation()!
@@ -50,6 +50,13 @@ it('keeps dictated study answers in the reviewed draft until the learner sends',
   await waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
   await act(async () => FakeSocket.instances[0]!.ready())
   await screen.findByRole('region', { name: 'Study topic' })
+  act(() => {
+    backend.socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, recording: true, capture_owned: true, recording_id: 'study-recording', conversation_id: 'chat-1' } })
+    backend.socket().emit({ type: 'recording.level', recording_id: 'study-recording', level: 0.5 })
+  })
+  expect(screen.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute('aria-valuenow', '50')
+  act(() => backend.socket().emit({ type: 'state.updated', state: { ...initialState, revision: 3 } }))
+  expect(screen.queryByRole('meter', { name: 'Microphone level' })).not.toBeInTheDocument()
   const saved = backend.conversations.get('chat-1')!
   saved.draft = 'Saved words\nMy spoken explanation'; saved.draft_version++
   act(() => {
@@ -58,7 +65,10 @@ it('keeps dictated study answers in the reviewed draft until the learner sends',
   })
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words\nMy spoken explanation'))
   expect(backend.requests.filter(request => request.path === '/chat')).toHaveLength(0)
-  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  const composer = screen.getByRole('textbox', { name: 'Your text' })
+  expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true)
+  expect(backend.requests.filter(request => request.path === '/chat')).toHaveLength(0)
+  expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
   await screen.findByText('Local reply')
   expect(backend.requests.find(request => request.path === '/chat')?.body.messages).toEqual([{ role: 'user', content: 'Saved words\nMy spoken explanation' }])
 })
