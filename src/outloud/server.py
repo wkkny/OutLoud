@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .runtime import RecordingRuntime, RecordingBusy, RuntimeUnavailable
+from .runtime import RecordingRuntime, RecordingBusy, RuntimeUnavailable, is_valid_recording_level
 from .capacity import CapacityUnavailable
 from .chat import Chat, ChatBusy, ChatCapacityBusy, ChatRequest, drain
 from .conversations import ConversationStore, DraftConflict
@@ -92,6 +92,8 @@ class ClientConnection:
         self.transcripts_ready = asyncio.Event()
         self.transcripts_ready.set()
         self.pending_conversations = set()
+        self.level_event = None
+        self.level_ready = asyncio.Event()
 
     def alive(self):
         return self.active and self.clock() - self.last_heartbeat < self.lease_seconds
@@ -99,6 +101,19 @@ class ClientConnection:
     def deliver(self, event):
         if not self.active:
             return
+        if event["type"] == "recording.level":
+            # A single replaceable slot keeps telemetry out of reliable queues.
+            # Meter traffic must not revoke a client, including expired peers.
+            if not self.alive() or event.get("session_id") != self.session_id or not is_valid_recording_level(event):
+                return
+            self.level_event = {"type": "recording.level", "recording_id": event["recording_id"],
+                                "level": float(event["level"])}
+            self.level_ready.set()
+            return
+        if event["type"] == "recording.state" and self.level_event is not None:
+            if not event["recording"] or event.get("recording_id") != self.level_event["recording_id"]:
+                self.level_event = None
+                self.level_ready.clear()
         if not self.alive():
             self.revoke(self)
             return
@@ -161,6 +176,20 @@ class ClientConnection:
         await self.ready_sent.wait()
         while True:
             await self.send(await self.controls.get())
+
+    async def send_levels(self):
+        await self.ready_sent.wait()
+        while self.active:
+            await self.level_ready.wait()
+            async with self.send_lock:
+                # Read only after the transport is available, so a slow send
+                # cannot hold an obsolete sample ahead of the latest reading.
+                event = self.level_event
+                self.level_event = None
+                self.level_ready.clear()
+                if event is not None and self.active:
+                    await self.websocket.send_json(event)
+            await asyncio.sleep(0)
 
     async def send_events(self, state_snapshot):
         await self.send({
@@ -587,6 +616,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
             tasks = [
                 asyncio.create_task(connection.send_events(state_snapshot)),
                 asyncio.create_task(connection.send_controls()),
+                asyncio.create_task(connection.send_levels()),
                 asyncio.create_task(connection.send_transcripts()),
                 asyncio.create_task(connection.receive_messages()),
                 asyncio.create_task(connection.process_acknowledgements()),

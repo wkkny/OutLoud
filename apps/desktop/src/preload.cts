@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = electron
 
 contextBridge.exposeInMainWorld('outloudDesktop', {
   managedBackend: true,
+  requestMicrophoneAccess: () => ipcRenderer.invoke('desktop:microphone-permission'),
+  openMicrophoneSettings: () => ipcRenderer.invoke('desktop:microphone-settings'),
   getState: () => ipcRenderer.invoke('desktop:state'),
   onState: (callback: (state: DesktopState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: DesktopState) => callback(state)

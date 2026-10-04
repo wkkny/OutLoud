@@ -49,6 +49,44 @@ try {
   await page.getByRole('textbox', { name: 'Your text' }).fill('Saved desktop draft')
   await page.getByText('Unsaved changes kept in this tab', { exact: true }).waitFor({ state: 'hidden' })
   assert.equal(await page.getByRole('button', { name: 'Start recording', exact: true }).isEnabled(), true)
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    // Exercise real IPC/preload/UI wiring without prompting the OS or capturing audio.
+    await application.evaluate(({ systemPreferences, shell }) => {
+      globalThis.smokePermissionOriginals = {
+        status: systemPreferences.getMediaAccessStatus, request: systemPreferences.askForMediaAccess,
+        open: shell.openExternal,
+      }
+      globalThis.smokeSettingsTargets = []
+      systemPreferences.getMediaAccessStatus = () => 'denied'
+      systemPreferences.askForMediaAccess = async () => { throw new Error('No real microphone prompt allowed') }
+      shell.openExternal = async (url) => { globalThis.smokeSettingsTargets.push(url) }
+    })
+    await page.getByRole('button', { name: 'Start recording', exact: true }).click()
+    const permissionNotice = page.getByRole('dialog', { name: 'Recording needs attention', exact: true })
+    await permissionNotice.waitFor()
+    assert.equal((await (await fetch('http://127.0.0.1:8765/state')).json()).recording, false)
+    await permissionNotice.getByRole('button', { name: 'Open microphone settings', exact: true }).click()
+    const targets = await application.evaluate(() => globalThis.smokeSettingsTargets)
+    assert.deepEqual(targets, [process.platform === 'darwin'
+      ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
+      : 'ms-settings:privacy-microphone'])
+    const blocked = await application.evaluate(async ({ BrowserWindow }, preload) => {
+      const untrusted = new BrowserWindow({ show: false, webPreferences: { preload, contextIsolation: true, sandbox: true } })
+      try {
+        await untrusted.loadURL('about:blank')
+        return await untrusted.webContents.executeJavaScript('window.outloudDesktop.requestMicrophoneAccess().then(() => false, () => true)')
+      } finally { untrusted.destroy() }
+    }, fileURLToPath(new URL('../dist/preload.cjs', import.meta.url)))
+    assert.equal(blocked, true)
+    await application.evaluate(({ systemPreferences, shell }) => {
+      const original = globalThis.smokePermissionOriginals
+      systemPreferences.getMediaAccessStatus = original.status
+      systemPreferences.askForMediaAccess = original.request
+      shell.openExternal = original.open
+      delete globalThis.smokePermissionOriginals
+      delete globalThis.smokeSettingsTargets
+    })
+  }
   assert.deepEqual(errors, [])
   // Closing before autosave must recover the last edits in the next native window.
   await page.getByRole('textbox', { name: 'Your text' }).fill('Desktop edits immediately before close')
@@ -99,7 +137,7 @@ try {
     pausedPid = undefined
     await backendStopped()
   }
-  console.log('PASS: Electron window, isolated renderer, managed Python, conversation/draft persistence, close/stop, macOS reopen, and force-quit warning/cancel/confirm. No microphone/model test performed.')
+  console.log('PASS: Electron window, isolated renderer, managed Python, conversation/draft persistence, microphone denial/settings and IPC boundary, close/stop, macOS reopen, and force-quit warning/cancel/confirm. No microphone/model test performed.')
 } finally {
   if (pausedPid) { try { process.kill(pausedPid, 'SIGCONT') } catch { /* Already exited. */ } }
   if (application) await application.close()

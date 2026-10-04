@@ -160,11 +160,11 @@ function ChatApp() {
               if (selectedId && draft) { library.edit(selectedId, event.target.value); editUnscopedDraft('') }
               else if (!selectedId) editUnscopedDraft(event.target.value)
             }} onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.nativeEvent.isComposing && (event.metaKey || event.ctrlKey)) { event.preventDefault(); if (canSend) void send() }
+              if (event.key === 'Enter' && !event.nativeEvent.isComposing && !event.shiftKey) { event.preventDefault(); if (canSend) void send() }
             }} placeholder="Send a message…" className="composer-input" aria-describedby={hasUnsavedDraft ? 'draft-status' : undefined} />
             <InputGroupAddon align="block-end" className="composer-toolbar">
-              <span className="composer-model">Gemma <span className="text-muted-foreground">· local</span></span>
-              <RecordingControl enabled={micEnabled} recording={recording} occupied={occupied} pending={dictation.pending} toggle={() => {
+              <span className="composer-model">Gemma 3:4b</span>
+              <RecordingControl enabled={micEnabled} recording={recording} level={dictation.level} occupied={occupied} pending={dictation.pending} toggle={() => {
                 if (recording) { void dictation.command('stop', selectedId ?? dictation.snapshot?.conversation_id ?? ''); return }
                 void (async () => {
                   const id = await ensureConversation()
@@ -177,7 +177,7 @@ function ChatApp() {
           </InputGroup>
           <div className="composer-notes">
             {hasUnsavedDraft && <span id="draft-status" className="composer-hint">Unsaved changes kept in this tab</span>}
-            <p className="send-shortcut"><Kbd>⌘ / Ctrl</Kbd><Kbd>Enter</Kbd><span>to send after reviewing</span></p>
+            <p className="send-shortcut"><Kbd>Enter</Kbd><span>to send · Shift+Enter for a new line</span></p>
           </div>
           {chat.busy && !chat.ownedBusy && <p role="status" className="capacity-note">This conversation is generating in another tab. Wait for its reply before sending.</p>}
           {recording && dictation.snapshot?.conversation_id !== selectedId && <p role="status" className="capacity-note">Recording stays bound to its original conversation; switching does not move dictated text.</p>}
