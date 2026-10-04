@@ -12,7 +12,7 @@
 .prototype-sidebar nav button.active { background: #e4ebe0; color: #244a37; font-weight: 600; }
 .prototype-sidebar-subjects { display: flex; flex: 1; min-height: 0; overflow-y: auto; flex-direction: column; gap: 6px; padding: 24px 0; font-size: 12px; }
 .prototype-sidebar-subjects button { flex: none; text-align: left; color: var(--proto-muted); line-height: 1.5; padding: 10px 13px; border-radius: 7px; }
-.prototype-sidebar-subjects button.active { color: var(--proto-ink); background: #ebeee7; font-weight: 550; }
+.prototype-sidebar-subjects button.active { color: var(--proto-ink); background: #ebeee7; }
 .prototype-sidebar-subjects button[data-slot=button] { justify-content: flex-start; margin-top: 5px; }
 .prototype-sidebar-bottom { flex: none; margin-top: auto; }
 .prototype-sidebar-bottom button { width: 100%; justify-content: flex-start; gap: 11px; padding: 11px 13px; font-size: 13px; }

@@ -47,6 +47,7 @@ On 2026-10-04, the collaborative browser exercised:
 - A and the refined B at 390 CSS-pixel width had no horizontal page overflow; B's Settings icon remained visible and clickable.
 - Refined B: expanded sidebar and bottom Settings control opened the model-settings dialog. Continue studying → typed answer → Enter preserved the answer, displayed feedback and cleared the composer. No decorative-eyebrow or global-readiness elements remained.
 - Missing models in refined B disabled dependent study actions, left New subject enabled, and showed setup guidance only beside the affected action.
+- Subject-selection layout regression: switching Operating Systems → DBMS changed its font weight from 400 to 550, wrapping the name and increasing row height from 38px to 56px. Browser bounding-box checks caught an 18px shift in subsequent rows. Removing the selected-only font weight leaves the color/background highlight and produces zero height/position changes for DBMS, Operating Systems and New subject at 1280px width. Retain this selection-stability check in production UI validation; the prototype has no permanent test suite.
 - Web TypeScript/build and lint pass. The production build omits the prototype import/chunks after the development-only gate is eliminated.
 - Existing web suite: 107 tests passed. No permanent prototype tests were added; these checks establish runnable exploration, not production behavior or usability approval.
 
