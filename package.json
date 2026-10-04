@@ -8,6 +8,7 @@
     "dev": "turbo run dev --filter=@outloud/web --filter=@outloud/backend",
     "dev:desktop": "bun run --cwd apps/desktop dev",
     "dev:web": "turbo run dev --filter=@outloud/web",
+    "prototype:study": "bun run --cwd apps/web dev --port 5175 --strictPort",
     "dev:backend": "turbo run dev --filter=@outloud/backend",
     "build": "turbo run build",
     "test": "turbo run test",
