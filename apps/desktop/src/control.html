@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <title>OutLoud</title>
+  <link rel="stylesheet" href="control.css">
+</head>
+<body>
+  <main>
+    <p class="brand">OutLoud · local voice chat</p>
+    <h1 id="title">Starting OutLoud…</h1>
+    <p id="message" role="status">Starting your local backend…</p>
+    <p id="hint">Your conversations and recordings stay on this computer.</p>
+    <button id="force" type="button" hidden>Force quit…</button>
+  </main>
+  <script type="module" src="../dist/control.js"></script>
+</body>
+</html>

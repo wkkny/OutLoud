@@ -269,7 +269,7 @@ it('explains how to fix microphone access without showing recording diagnostics'
   await open()
   act(() => backend.socket().emit({ type: 'recording.error', message: 'Recording failed: PortAudioError at /private/audio.py. Check your microphone or permissions and retry.' }))
   const notice = within(screen.getByRole('region', { name: 'Notifications' })).getByRole('dialog', { name: 'Recording needs attention' })
-  expect(within(notice).getByText("Check your microphone and allow microphone access in your Mac's settings, then try again.")).toBeInTheDocument()
+  expect(within(notice).getByText("Check your microphone and allow microphone access in your computer's settings, then try again.")).toBeInTheDocument()
   expect(notice).not.toHaveTextContent(/PortAudio|private|Recording failed/i)
 })
 

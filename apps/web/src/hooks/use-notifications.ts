@@ -21,7 +21,7 @@ function chatDescription(error: string) {
 }
 
 function recordingDescription(error: string) {
-  if (error.startsWith('Recording failed:') && error.endsWith('Check your microphone or permissions and retry.')) return "Check your microphone and allow microphone access in your Mac's settings, then try again."
+  if (error.startsWith('Recording failed:') && error.endsWith('Check your microphone or permissions and retry.')) return "Check your microphone and allow microphone access in your computer's settings, then try again."
   if (error.startsWith('Microphone is occupied')) return 'The microphone is already in use. Stop the current recording before starting another.'
   if (error.startsWith('Transcription capacity is full.')) return 'OutLoud is busy with other recordings. Try again in a moment.'
   if (error.startsWith('This conversation was deleted.')) return 'This chat was deleted. Choose another chat before recording.'
@@ -44,6 +44,7 @@ type NotificationsState = {
 
 /** Each condition owns one toast until it resolves, even if the user dismisses it. */
 export function useNotifications({ connection, safety, reconnect, selectedId, chatError, capacityFull, draftError, library, libraryError, recordingError }: NotificationsState) {
+  const managedBackend = window.outloudDesktop?.managedBackend === true
   const { add, close, update } = useToastManager()
   const notices = useRef(new Map<string, { id: string | null; dismissed: boolean; identity: string | null }>())
   const outage = useRef(false)
@@ -131,10 +132,12 @@ export function useNotifications({ connection, safety, reconnect, selectedId, ch
     } else if (outage.current) {
       sync('connection', {
         title: connection === 'exhausted' ? "Can't connect to OutLoud" : connection === 'retrying' ? 'Trying to reconnect' : 'Connecting to OutLoud',
-        description: 'Your text is still here. Try reconnecting.',
+        description: managedBackend && connection === 'exhausted'
+          ? 'Your text is still here. Try reconnecting, or close and reopen OutLoud if it remains unavailable.'
+          : 'Your text is still here. Try reconnecting.',
         type: 'warning', timeout: 0,
         actionProps: { children: 'Reconnect', 'aria-label': 'Reconnect to OutLoud', disabled: safety === 'stopping', onClick: reconnect },
       })
     }
-  }, [connection, safety, reconnect])
+  }, [connection, safety, reconnect, managedBackend])
 }

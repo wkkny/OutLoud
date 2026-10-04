@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import secrets
 import sqlite3
+import sys
+import threading
 import time
 from typing import Literal
 from contextlib import asynccontextmanager
@@ -256,7 +258,8 @@ def production_runtime(publish):
     )
 
 
-def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic, ollama_client_factory=None, conversations_path=None):
+def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monotonic, ollama_client_factory=None, conversations_path=None, desktop_token=None, request_shutdown=None):
+    allowed_origins = ALLOWED_ORIGINS | ({"http://127.0.0.1:5174"} if desktop_token is not None and request_shutdown is not None else set())
     production = runtime_factory is None
     runtime_factory = runtime_factory or production_runtime
     clients = {}
@@ -360,7 +363,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=sorted(ALLOWED_ORIGINS),
+        allow_origins=sorted(allowed_origins),
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "X-Session-ID"],
     )
@@ -368,7 +371,12 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
     @app.middleware("http")
     async def validate_origin(request, call_next):
         origin = request.headers.get("origin")
-        if origin is not None and origin not in ALLOWED_ORIGINS:
+        if request.url.path in ("/desktop/status", "/desktop/shutdown"):
+            if desktop_token is None or request_shutdown is None:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            if origin is not None:
+                return JSONResponse({"detail": "Desktop control does not allow Origin"}, status_code=403)
+        if origin is not None and origin not in allowed_origins:
             return JSONResponse({"detail": "Origin is not allowed"}, status_code=403)
         return await call_next(request)
 
@@ -472,6 +480,24 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         readiness = app.state.runtime.readiness()
         return JSONResponse(readiness, status_code=200 if readiness["ready"] else 503)
 
+    def require_desktop_owner(request: Request):
+        token = request.headers.get("x-outloud-desktop-token")
+        if token is None or not secrets.compare_digest(token.encode("utf-8"), desktop_token.encode("utf-8")):
+            raise HTTPException(status_code=403, detail="Desktop owner token required")
+
+    @app.get("/desktop/status", dependencies=[Depends(require_desktop_owner)])
+    async def desktop_status():
+        runtime = getattr(app.state, "runtime", None)
+        if runtime is None or not runtime.readiness()["ready"]:
+            raise HTTPException(status_code=503, detail="Recording workers are unavailable")
+        return {"status": "ready"}
+
+    @app.post("/desktop/shutdown", status_code=202, dependencies=[Depends(require_desktop_owner)])
+    async def desktop_shutdown():
+        app.state.runtime.begin_shutdown()
+        request_shutdown()
+        return {"accepted": True}
+
     @app.get("/state")
     async def state(request: Request):
         return state_snapshot(request.headers.get("x-session-id"))
@@ -541,7 +567,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
 
     @app.websocket("/events")
     async def events(websocket: WebSocket):
-        if websocket.headers.get("origin") not in ALLOWED_ORIGINS:
+        if websocket.headers.get("origin") not in allowed_origins:
             await websocket.close(code=1008)
             return
         conversation_id = websocket.query_params.get("conversation_id")
@@ -592,6 +618,25 @@ app = create_app()
 
 
 def main():
+    desktop_token = os.environ.get("OUTLOUD_DESKTOP_TOKEN")
+    if desktop_token is not None:
+        def request_shutdown():
+            runtime = getattr(desktop_app.state, "runtime", None)
+            if runtime is not None:
+                runtime.begin_shutdown()
+            server.should_exit = True
+
+        desktop_app = create_app(desktop_token=desktop_token, request_shutdown=request_shutdown)
+        server = uvicorn.Server(uvicorn.Config(desktop_app, host="127.0.0.1", port=8765))
+        if os.environ.get("OUTLOUD_DESKTOP_PARENT_STDIN") == "1":
+            # EOF also handles an Electron crash: never leave capture orphaned.
+            def watch_owner():
+                for _ in sys.stdin:
+                    pass
+                request_shutdown()
+            threading.Thread(target=watch_owner, name="desktop-owner", daemon=True).start()
+        server.run()
+        return
     uvicorn.run(app, host="127.0.0.1", port=8765)
 
 

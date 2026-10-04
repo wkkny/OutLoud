@@ -36,10 +36,11 @@ export const SELECTION_KEY = 'outloud.selected-conversation'
 const DRAFTS_KEY = 'outloud.unsaved-drafts'
 type Draft = { text: string; base: string; version: number; conflict: string | null; error: string | null }
 type View = { list: Conversation[]; selectedId: string | null; details: Record<string, ConversationDetail>; historyRevisions: Record<string, number>; drafts: Record<string, Draft>; error: string | null; loading: boolean }
-function stored(key: string) { try { return sessionStorage.getItem(key) } catch { return null } }
+function stored(key: string, desktopRecovery = false) { try { return (desktopRecovery ? localStorage : sessionStorage).getItem(key) } catch { return null } }
 
-/** Durable identity comes from the backend. Only tab selection and unsaved recovery live here. */
+/** Durable identity comes from the backend. Desktop draft recovery survives native window closure. */
 export class ConversationLibrary {
+  private readonly desktopRecovery = window.outloudDesktop?.managedBackend === true
   private view: View
   private listeners = new Set<() => void>()
   private saves = new Map<string, Promise<boolean>>()
@@ -51,7 +52,7 @@ export class ConversationLibrary {
   constructor() {
     let drafts: Record<string, Draft> = {}
     try {
-      const parsed = z.record(z.string(), z.object({ text: z.string(), base: z.string(), version: z.number(), conflict: z.string().nullable(), error: z.string().nullable() })).safeParse(JSON.parse(stored(DRAFTS_KEY) ?? '{}'))
+      const parsed = z.record(z.string(), z.object({ text: z.string(), base: z.string(), version: z.number(), conflict: z.string().nullable(), error: z.string().nullable() })).safeParse(JSON.parse(stored(DRAFTS_KEY, this.desktopRecovery) ?? '{}'))
       if (parsed.success) drafts = parsed.data
     } catch { /* A corrupt recovery cache must not prevent connecting. */ }
     this.view = { list: [], selectedId: stored(SELECTION_KEY), details: {}, historyRevisions: {}, drafts, error: null, loading: true }
@@ -65,7 +66,10 @@ export class ConversationLibrary {
       if (this.view.selectedId) sessionStorage.setItem(SELECTION_KEY, this.view.selectedId)
       else sessionStorage.removeItem(SELECTION_KEY)
       const unsaved = Object.fromEntries(Object.entries(this.view.drafts).filter(([, draft]) => draft.text !== draft.base || draft.conflict !== null))
-      sessionStorage.setItem(DRAFTS_KEY, JSON.stringify(unsaved))
+      // A native window's sessionStorage disappears on close, including edits
+      // made before autosave or while the backend is unavailable.
+      const recoveryStorage = this.desktopRecovery ? localStorage : sessionStorage
+      recoveryStorage.setItem(DRAFTS_KEY, JSON.stringify(unsaved))
     } catch { /* In-memory editing still works when browser storage is unavailable. */ }
     if (!this.disposed) for (const listener of this.listeners) listener()
   }

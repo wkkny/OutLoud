@@ -154,7 +154,8 @@ slot, including under repeated ASGI disconnect cancellation.
 ## Local security and tests
 
 Trusted hosts are `localhost` and `127.0.0.1`. Allowed browser origins are the
-localhost/127.0.0.1 UI on port 5173 and backend on port 8765. HTTP Origin, when
+localhost/127.0.0.1 UI on port 5173 and backend on port 8765. An Electron-managed
+backend additionally allows the exact desktop origin `http://127.0.0.1:5174`. HTTP Origin, when
 present, and WebSocket Origin are checked. CORS allows the conversation HTTP methods
 and session/content headers. The backend is loopback-only, not a remote service.
 Other local programs remain outside its authentication threat model.

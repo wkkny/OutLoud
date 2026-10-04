@@ -5,7 +5,8 @@
   "workspaces": ["apps/*", "tooling/*"],
   "scripts": {
     "setup": "bun install --frozen-lockfile && uv sync --locked",
-    "dev": "turbo run dev",
+    "dev": "turbo run dev --filter=@outloud/web --filter=@outloud/backend",
+    "dev:desktop": "bun run --cwd apps/desktop dev",
     "dev:web": "turbo run dev --filter=@outloud/web",
     "dev:backend": "turbo run dev --filter=@outloud/backend",
     "build": "turbo run build",
