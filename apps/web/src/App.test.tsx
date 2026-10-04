@@ -173,6 +173,15 @@ it('keeps recovered first-chat edits when an earlier creation finishes after unm
   await screen.findByRole('button', { name: 'Select New conversation' })
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Newer recovered words')
   expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(0)
+  await screen.findByText('Not sent')
+  expect(within(screen.getByRole('article', { name: 'You' })).getByText('Original first-chat words')).toBeVisible()
+  const retry = screen.getByRole('button', { name: 'Retry' })
+  await waitFor(() => expect(retry).toBeEnabled())
+  fireEvent.click(retry)
+  await screen.findByText('Local reply')
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Newer recovered words')
+  expect(backend.requests.filter((request) => request.path === '/conversations' && request.method === 'POST')).toHaveLength(1)
+  expect(backend.requests.find((request) => request.path === '/chat')?.body.messages).toEqual([{ role: 'user', content: 'Original first-chat words' }])
 })
 
 it('shows the first message immediately while its conversation is still being created', async () => {

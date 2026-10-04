@@ -77,7 +77,7 @@ function ChatApp() {
   }
   const ensureConversation = async () => selectedId ?? createChat()
   const send = async (retry?: PendingSend) => {
-    if (retry ? !canRetry || retry.conversationId !== selectedId : !canSend) return
+    if (retry ? !canRetry || (retry.conversationId !== null && retry.conversationId !== selectedId) : !canSend) return
     const text = retry?.text ?? composerText
     const attempt = chat.prepare(selectedId, text, retry)
     setSending(true)

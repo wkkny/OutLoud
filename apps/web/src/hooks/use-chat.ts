@@ -38,7 +38,7 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
     }
   }, [])
   const prepare = (conversationId: string | null, text: string, retry?: PendingSend) => {
-    const previousAttempt = retry ?? pendingRef.current.findLast((item) => item.conversationId === conversationId && item.text === text && item.delivery === 'failed')
+    const previousAttempt = retry ?? pendingRef.current.findLast((item) => (item.conversationId === null || item.conversationId === conversationId) && item.text === text && item.delivery === 'failed')
     const item: PendingSend = previousAttempt ? { ...previousAttempt, delivery: 'sending' } : {
       id: crypto.randomUUID(), conversationId, text, createdAt: new Date().toISOString(), delivery: 'sending',
     }
@@ -186,7 +186,9 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
   const savedMessages = selectedId ? live[selectedId] ?? details[selectedId]?.messages ?? [] : []
   const messages: ChatViewMessage[] = [
     ...savedMessages.map((message) => ({ ...message, id: message.request_id ? `${message.request_id}-${message.role}` : message.id })),
-    ...pending.filter((item) => item.conversationId === selectedId && !savedMessages.some((message) => message.request_id === item.id)).map((item): ChatViewMessage => ({
+    // Unscoped attempts have never reached /chat. Keep their Retry visible until
+    // the user attaches them to a conversation by retrying the original text.
+    ...pending.filter((item) => (item.conversationId === null || item.conversationId === selectedId) && !savedMessages.some((message) => message.request_id === item.id)).map((item): ChatViewMessage => ({
       id: `${item.id}-user`, role: 'user', content: item.text.trim(), status: 'complete', metrics: null,
       created_at: item.createdAt, delivery: item.delivery, pendingSend: item,
     })),
