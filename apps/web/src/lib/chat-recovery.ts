@@ -7,22 +7,23 @@ const pendingSendSchema = z.object({
   createdAt: z.string(), delivery: z.enum(['sending', 'failed']),
 })
 export type PendingSend = z.infer<typeof pendingSendSchema>
+const recoveryStorage = () => window.outloudDesktop?.managedBackend ? localStorage : sessionStorage
 
 export function readUnscopedDraft(): string {
-  try { return sessionStorage.getItem(unscopedDraftKey) ?? '' }
+  try { return recoveryStorage().getItem(unscopedDraftKey) ?? '' }
   catch { return '' }
 }
 
 export function writeUnscopedDraft(text: string): void {
   try {
-    if (text) sessionStorage.setItem(unscopedDraftKey, text)
-    else sessionStorage.removeItem(unscopedDraftKey)
+    if (text) recoveryStorage().setItem(unscopedDraftKey, text)
+    else recoveryStorage().removeItem(unscopedDraftKey)
   } catch { /* Editing still works when browser storage is unavailable. */ }
 }
 
 export function readPendingSends(): PendingSend[] {
   try {
-    const parsed = z.array(pendingSendSchema).safeParse(JSON.parse(sessionStorage.getItem(pendingSendsKey) ?? '[]'))
+    const parsed = z.array(pendingSendSchema).safeParse(JSON.parse(recoveryStorage().getItem(pendingSendsKey) ?? '[]'))
     // A reload cannot resume a stream. Retain its identity for an explicit retry.
     return parsed.success ? parsed.data.map((item) => ({ ...item, delivery: 'failed' })) : []
   } catch { return [] }
@@ -30,7 +31,7 @@ export function readPendingSends(): PendingSend[] {
 
 export function writePendingSends(pending: PendingSend[]): void {
   try {
-    if (pending.length) sessionStorage.setItem(pendingSendsKey, JSON.stringify(pending))
-    else sessionStorage.removeItem(pendingSendsKey)
+    if (pending.length) recoveryStorage().setItem(pendingSendsKey, JSON.stringify(pending))
+    else recoveryStorage().removeItem(pendingSendsKey)
   } catch { /* Keep in-memory retries available when browser storage is unavailable. */ }
 }

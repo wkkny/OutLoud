@@ -41,6 +41,8 @@ class RecordingRuntime:
         self.events = queue.Queue()
         self.recordings = queue.Queue()
         self.lock = threading.RLock()
+        self.stop_lock = threading.Lock()
+        self.workers_stopped = False
         self.recording = {
             "recording": False,
             "hands_free": False,
@@ -254,6 +256,8 @@ class RecordingRuntime:
 
     def configure_fn(self, session_id, enabled, conversation_id):
         with self.lock:
+            if self.shutting_down:
+                raise RuntimeUnavailable("Backend is shutting down")
             if self.owner_session_id not in (None, session_id):
                 raise RecordingBusy("Recording is active in another client")
             if enabled and not self.readiness()["ready"]:
@@ -293,7 +297,8 @@ class RecordingRuntime:
             # Disconnect cleanup may race shutdown or an already exited worker.
             pass
 
-    def stop(self, *, close_transcripts=True):
+    def begin_shutdown(self):
+        """Reject new capture commands and enqueue final capture stop without joining."""
         with self.lock:
             if self.shutting_down:
                 return
@@ -301,9 +306,15 @@ class RecordingRuntime:
             self.owner_session_id = None
             self.fn_shortcut.disable()
             self.events.put(None)
-        self.fn_shortcut.join()
-        self.threads["recording"].join()
-        self.recordings.put(None)
-        self.threads["transcription"].join()
-        if close_transcripts:
-            self.transcripts.close()
+
+    def stop(self, *, close_transcripts=True):
+        self.begin_shutdown()
+        with self.stop_lock:
+            if not self.workers_stopped:
+                self.fn_shortcut.join()
+                self.threads["recording"].join()
+                self.recordings.put(None)
+                self.threads["transcription"].join()
+                self.workers_stopped = True
+            if close_transcripts:
+                self.transcripts.close()

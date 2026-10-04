@@ -5,3 +5,4 @@ recording.wav
 recordings/
 node_modules/
 .turbo/
+apps/desktop/dist/

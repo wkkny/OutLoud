@@ -1,6 +1,7 @@
 # OutLoud
 
-A local, voice-first chat app for macOS. Python records the microphone and
+A local, voice-first chat app with a browser UI and an Electron development app
+targeting macOS, Windows, and Linux. Python records the microphone and
 transcribes with Whisper; the backend saves the transcript to the conversation's
 editable draft. Transcripts never auto-send. Review your text, then send it to local
 Gemma `gemma3:4b` through Ollama for a streamed reply.
@@ -58,8 +59,20 @@ history confirms accepted sends without sending them again. Newer composer edits
 are preserved, and interrupted sends are never retried automatically.
 
 Browser Fn/Globe capture, hold-to-record, and double-tap controls are removed.
-Electron-owned shortcuts are a separate future integration; no Electron app is
-included in this implementation.
+Electron-owned shortcuts are a separate future integration. The
+[Electron development app](apps/desktop/README.md) currently uses recording buttons.
+
+## Desktop development
+
+Run `bun run setup`, then `bun run dev:desktop` to open Electron with the existing
+chat UI. Electron manages Python; closing the window stops recording and drains
+transcription, with a loss warning before an explicit Force quit. There is no
+tray/background mode. Desktop saved data lives in a separate per-user directory.
+
+The desktop UI uses port **5174**, and its backend uses **8765**. Another backend
+on that port must be stopped first; Electron never attaches to it. Python,
+FFmpeg, and Ollama are still separate prerequisites, not bundled installers.
+See [desktop launch, lifecycle, data, and platform limitations](apps/desktop/README.md).
 
 ## Connection recovery
 
@@ -128,10 +141,11 @@ Run these from the repository root:
 | --- | --- |
 | `bun run setup` | Install Bun and uv dependencies using the committed lockfiles |
 | `bun run dev` | Start the backend and web UI together |
+| `bun run dev:desktop` | Build and launch Electron, its dedicated UI server, and managed Python |
 | `bun run dev:web` | Start only the web UI |
 | `bun run dev:backend` | Start only the backend |
 | `bun run test` | Run Python unittest and frontend Vitest suites |
-| `bun run build` | Type-check and build the web UI into `apps/web/dist/` |
+| `bun run build` | Type-check/build the web UI and Electron main/preload code |
 | `bun run lint` | Run frontend lint |
 | `bun run check` | Validate dependencies, then run tests, TypeScript/build, and frontend lint |
 
@@ -170,7 +184,8 @@ or deploy the app.
 - **Backend (Linux, Windows, macOS):** the Python unittest suite, lockfile validation,
   and installed-package compatibility checks. Python follows `.python-version`;
   Bun follows `package.json`'s `packageManager` field.
-- **CI:** succeeds only when web validation and every backend matrix job pass.
+- **Desktop (Linux, Windows, macOS):** subprocess lifecycle tests, TypeScript build, and lint; no GUI/audio tests.
+- **CI:** succeeds only when web validation and every backend and desktop matrix job pass.
   Failed, cancelled, or skipped validation jobs do not satisfy this check.
 
 CI uses the same `bun run check` command as local validation, filtered to the
@@ -188,6 +203,7 @@ status checks in GitHub's `Protect main` ruleset too.
 
 ```text
 apps/web/             React, TypeScript, Vite, shadcn/ui, and bundled Geist
+apps/desktop/         Electron main/preload, managed-backend lifecycle, dev launcher
 src/outloud/          Python recording, transcription, HTTP/WebSocket backend
 tests/               Python tests
 tooling/backend/     Bun workspace scripts that invoke uv from the repo root
@@ -203,9 +219,8 @@ workspace is just a command wrapper, not a second Python project. Its scripts
 change to the repository root so recordings and the Python environment stay in
 one place.
 
-A desktop app can be added under `apps/desktop/`. When a second frontend needs
-shared UI or protocol schemas, add `packages/*` to the root workspaces and
-extract those modules then. There are no placeholder desktop or shared packages.
+The desktop app reuses `apps/web/` directly. There are no duplicate frontend or
+placeholder shared packages. Installers and global recording shortcuts are deferred.
 
 ## Saved data and current limits
 

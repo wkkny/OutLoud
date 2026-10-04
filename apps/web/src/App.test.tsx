@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { backendFixture, FakeSocket, initialState } from '@/test/backend-fixture'
 
 let backend: ReturnType<typeof backendFixture>
-beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); backend = backendFixture() })
+beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); localStorage.clear(); Reflect.deleteProperty(window, 'outloudDesktop'); backend = backendFixture() })
+afterEach(() => { Reflect.deleteProperty(window, 'outloudDesktop') })
 it('shows the app name only in the sidebar and the selected conversation title in the main area', async () => {
   backend.conversations.clear()
   render(<App />)
@@ -1035,4 +1036,46 @@ it('selects a conversation from the mobile drawer and closes it without losing t
   await waitFor(() => expect(toggle).toHaveFocus())
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
   expect(backend.socket().closed).toBe(false)
+})
+
+it.each([false, true])('recovers edits from a closed desktop window without changing browser storage, managed desktop = %s', async (managedDesktop) => {
+  if (managedDesktop) vi.stubGlobal('outloudDesktop', { managedBackend: true })
+  const view = await open()
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Words typed just before closing' } })
+  view.unmount()
+  // Native window destruction ends its session; its persistent profile survives.
+  sessionStorage.clear()
+  await open()
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(managedDesktop ? 'Words typed just before closing' : 'Saved words'))
+})
+
+it.each([false, true])('recovers a first-message draft after desktop closure, managed desktop = %s', async (managedDesktop) => {
+  if (managedDesktop) vi.stubGlobal('outloudDesktop', { managedBackend: true })
+  backend.conversations.clear()
+  const view = render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'First words before closing' } })
+  view.unmount()
+  sessionStorage.clear()
+  render(<App />)
+  act(() => backend.socket().ready())
+  await screen.findByText('Your conversations will appear here.')
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(managedDesktop ? 'First words before closing' : '')
+})
+
+it.each([false, true])('offers desktop restart guidance after connection retries are exhausted, managed desktop = %s', async (managedDesktop) => {
+  if (managedDesktop) vi.stubGlobal('outloudDesktop', { managedBackend: true })
+  await open()
+  vi.useFakeTimers()
+  for (const delay of [500, 1000, 2000, 4000]) {
+    await act(async () => backend.socket().onerror?.())
+    await act(async () => vi.advanceTimersByTimeAsync(delay))
+  }
+  await act(async () => backend.socket().onerror?.())
+  const notice = screen.getByRole('dialog', { name: "Can't connect to OutLoud" })
+  expect(notice).toHaveTextContent(managedDesktop
+    ? 'Your text is still here. Try reconnecting, or close and reopen OutLoud if it remains unavailable.'
+    : 'Your text is still here. Try reconnecting.')
+  expect(within(notice).getByRole('button', { name: 'Reconnect to OutLoud' })).toBeEnabled()
 })
