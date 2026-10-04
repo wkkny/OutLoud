@@ -39,7 +39,7 @@ See [ADR 0003](adr/0003-subject-context-and-conversation-modes.md) and [the rele
 ## Walkthrough
 
 1. Expand/collapse DBMS. Open Normalization practice or Exam revision. Clicking a subject name returns to its overview without changing the folder's text metrics.
-2. Open Exam revision: Normalization and Transactions are already selected. Topics opens the subject's topic catalog; add Indexing, then Apply topics. Focus chooses a topic without generating a question.
+2. Open Exam revision: Normalization and Transactions are already selected. Topics opens a compact checkbox dropdown beneath its button, with no modal or dimmed overlay; add Indexing, then Apply topics. Escape or clicking outside dismisses uncommitted selections. Focus chooses a topic without generating a question.
 3. The initial message area is empty in either mode. Type an unsent draft, switch to Chat and back, and keep that draft. Merely switching generates neither a question nor assistance. A previously requested practice question remains saved.
 4. Ask Chat to explain a selected topic. The demo supplies guidance for it. Return to Study and send “Ask me a question”; its next answer is assisted. Discussion before requesting a question is not assessment evidence. Explain normalization is also available after a conversation has begun, without sending unrelated composer text.
 5. Ask “Ask me another question” after the reviewed assisted attempt. A new question can begin an independent attempt. Choosing a new practice question before answering must not bypass pending assistance. No new progress is awarded in this demo.
@@ -68,6 +68,7 @@ The collaborative browser exercised these paths on 2026-10-04:
 - At 390px, the shared workspace had one composer and no horizontal overflow. The Subjects drawer opened/closed, and bottom Settings remained visible and unobscured.
 - Earlier learner-led opening revision: Exam revision opened with zero stored questions, zero question headings, an empty message area and one neutral composer in both Study and Chat, including after switching between them. A first free-form Study message sent without generating a question, an assessment label or a hidden quiz. Clicking Practice then displayed its requested question as a paragraph, still without a question heading.
 - Practice-control removal: the empty Study opening has only Dictate and Send in the composer toolbar. “Ask me a question about normalization” produces a normal tutor reply, with no question heading or duplicate quiz card. The request itself is not graded.
+- Topic-dropdown revision: adding Indexing and applying retained Normalization as focus, selected three topics and generated no question. Apply/Escape returned keyboard focus to Topics; clicking the composer dismissed the dropdown and focused the composer. Removing the focus with an unsent draft blocked Apply and retained the draft. At 390px, the dropdown stayed inside the viewport without horizontal overflow. No modal backdrop or `aria-modal=true` appeared.
 - Web TypeScript/build, lint and the 107 existing web tests pass. The production bundle omits prototype JavaScript. No permanent prototype test suite was added; these checks establish runnable exploration, not production assessment correctness or usability approval.
 
 ## Limitations
