@@ -115,7 +115,8 @@
 .prototype-study-body { display: flex; gap: 28px; }
 .prototype-conversation { flex: 1; min-width: 0; max-width: 760px; margin: 0 auto; padding: 35px 5px 25px; }
 .prototype-question { padding-bottom: 22px; }
-.prototype-question h2 { font-size: 21px; line-height: 1.6; letter-spacing: -.3px; }
+.prototype-conversation-empty { min-height: 280px; }
+.prototype-practice-question { font-size: 14px; line-height: 1.8; }
 .prototype-question > p { font-size: 11px; color: var(--proto-muted); margin-top: 16px; }
 .prototype-answer { border-radius: 10px; background: #f0f3eb; padding: 20px 24px; margin: 16px 0 24px; }
 .prototype-answer h3 { margin-bottom: 10px; font-size: 13px; }
@@ -201,6 +202,7 @@
   .variant-B .prototype-home { padding-top: 25px; }
   .prototype-next-topic { padding: 23px; }
   .prototype-study { padding: 20px 17px 150px; }
+  .prototype-conversation-empty { min-height: 180px; }
   .prototype-workspace-heading { flex-wrap: wrap; }
   .prototype-workspace-controls { gap: 12px; }
   .prototype-question-topic { margin-left: 0; width: 100%; }

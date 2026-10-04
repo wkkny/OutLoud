@@ -29,7 +29,7 @@ The original layouts are preserved in `6968624`; the expanded/minimal B refineme
 
 - Subjects are the sidebar groups/folders. Conversation titles, not topic names, are nested beneath them. A subject holds the topic catalog, approved material and progress; sibling conversations do not share transcripts or drafts.
 - Study and Chat are modes of one conversation workspace with one composer. No separate mode destinations in the sidebar. Mode switches preserve the conversation, draft and saved question, and old turns keep their original mode and assessment topic.
-- Conversations can select one or several topics. Study asks one question about an explicit topic at a time, so evidence stays attributable. Topic changes cannot reinterpret an unsent answer; the demo blocks changing its question topic until that draft is sent or cleared.
+- Conversations can select one or several topics. Both modes start with an empty message area and neutral composer, with no opening question, quiz heading or replacement greeting. Practice is opt-in via the composer toolbar and displays a normal-text question about the current focus. Free-form Study messages are discussion, not assessment against a hidden prompt. Explicit practice answers remain attributable to one topic. Topic changes cannot reinterpret an unsent message; the demo blocks changing its focus until that draft is sent or cleared.
 - Relevant help delivered in Chat makes the corresponding Study attempt assisted. Mode toggles alone do not. Retries/repeated answers keep their assistance; starting a fresh question after completing the assisted attempt can begin an independent attempt.
 - Settings stays at the sidebar bottom independently of conversation-list scrolling. Desktop navigation is expanded; narrow screens open the same folders in a drawer.
 - No global readiness indicators, decorative eyebrows, motivational slogans, duplicate subject tabs or static study-step strip. Headings name content; other text must explain an action, result, evidence or failure. Missing dependencies appear beside affected actions, with a route to Settings.
@@ -39,10 +39,10 @@ See [ADR 0003](adr/0003-subject-context-and-conversation-modes.md) and [the rele
 ## Walkthrough
 
 1. Expand/collapse DBMS. Open Normalization practice or Exam revision. Clicking a subject name returns to its overview without changing the folder's text metrics.
-2. Open Exam revision: Normalization and Transactions are already selected. Topics opens the subject's topic catalog; add Indexing, then Apply topics. Question topic chooses the current Study focus within that selection.
-3. Type an unsent draft. Switch to Chat and back to Study. The draft and original question remain; merely switching adds no assistance.
-4. Choose Explain normalization, or ask Chat to explain a selected topic. The demo appends a Chat explanation and marks help for that topic without sending unrelated composer text. Switch to Study and send an answer: it is labelled assisted and cannot establish independent understanding.
-5. Choose Practice this after the reviewed assisted attempt. A new question can begin an independent attempt. Choosing a new practice question before answering must not bypass pending assistance. No new progress is awarded in this demo.
+2. Open Exam revision: Normalization and Transactions are already selected. Topics opens the subject's topic catalog; add Indexing, then Apply topics. Focus chooses a topic without generating a question.
+3. The initial message area is empty in either mode. Type an unsent draft, switch to Chat and back, and keep that draft. Merely switching generates neither a question nor assistance. A previously requested practice question remains saved.
+4. Ask Chat to explain a selected topic. The demo supplies guidance for it. Return to Study and request Practice; the next practice answer is assisted. Discussion before requesting Practice is not assessment evidence. Explain normalization is also available after a conversation has begun, without sending unrelated composer text.
+5. Choose Practice after the reviewed assisted attempt. A new question can begin an independent attempt. Choosing a new practice question before answering must not bypass pending assistance. No new progress is awarded in this demo.
 6. Leave different drafts in Normalization practice and Exam revision. Switch conversations: each keeps its own draft, mode and message history. Subject material and the topic catalog remain shared.
 7. Choose New conversation within DBMS. It inherits the subject context and available topics. Before the first send it is an in-memory pending draft, not another saved sidebar entry. The first reviewed send lists it under DBMS. Reopening New conversation resumes an existing pending draft rather than discarding it.
 8. Dictate, then Stop. Simulated text enters the current draft without a microphone. Mode/topic/conversation navigation is disabled during capture so the target cannot change. Send remains separate from recording.
@@ -58,7 +58,7 @@ The collaborative browser exercised these paths on 2026-10-04:
 
 - Initial variants: home/resume/typed answer, no backend/model requests, URL switching, manual subject creation without models and a 390px overflow check.
 - Expanded B selection bug: selected-only weight 550 wrapped DBMS, growing its row from 38px to 56px and shifting subsequent rows by 18px. Removing that weight gave zero selection shift. The later grouped-sidebar revision also passed bounding-box comparisons when selecting Operating Systems and DBMS without changing expansion.
-- Grouped Exam revision opened with two selected topics and exactly one composer. Study → Chat retained its ID, unsent draft and original Normalization question; assistance remained empty.
+- Earlier grouped revision: Exam revision opened with two selected topics and exactly one composer. Study → Chat retained its ID, unsent draft and original Normalization question; assistance remained empty.
 - Explain normalization → Study → Send recorded a Chat guidance turn and a distinct assisted Study answer attributed to Normalization. The sibling conversation remained unchanged; the composer cleared and no backend/model requests occurred.
 - Topics → add Indexing → Apply preserved the question and yielded three selected topics. Different drafts in Exam revision and Normalization practice survived navigation, and Exam revision retained its two turns.
 - New conversation inherited DBMS and its topic catalog, remained pending before sending, then Enter in Chat saved General DBMS discussion as the third nested conversation. A non-guidance Chat turn did not mark assistance.
@@ -66,6 +66,7 @@ The collaborative browser exercised these paths on 2026-10-04:
 - Practice before answering retained pending Chat assistance. After the assisted answer, Practice created a fresh question eligible for an independent attempt while the old turn stayed assisted and the Chat turn retained its mode.
 - During simulated recording, both modes, the topic selector, conversation navigation and Send were disabled while Stop remained available. No real microphone was accessed.
 - At 390px, the shared workspace had one composer and no horizontal overflow. The Subjects drawer opened/closed, and bottom Settings remained visible and unobscured.
+- Learner-led opening revision: Exam revision opened with zero stored questions, zero question headings, an empty message area and one neutral composer in both Study and Chat, including after switching between them. A first free-form Study message sent without generating a question, an assessment label or a hidden quiz. Clicking Practice then displayed its requested question as a paragraph, still without a question heading.
 - Web TypeScript/build, lint and the 107 existing web tests pass. The production bundle omits prototype JavaScript. No permanent prototype test suite was added; these checks establish runnable exploration, not production assessment correctness or usability approval.
 
 ## Limitations

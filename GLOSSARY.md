@@ -25,7 +25,7 @@ An area the learner is studying, such as DBMS, that groups its topics, study mat
 A named part of a subject that the learner intends to study, such as normalization within DBMS.
 
 **Study mode**:
-A question-led conversation mode in which answers can supply assessment evidence for a subject's topics.
+A learning-focused conversation mode with optional practice, whose answers can supply assessment evidence for a subject's topics.
 
 **Chat mode**:
 An open-ended conversation mode for discussion without automatic topic assessment.
