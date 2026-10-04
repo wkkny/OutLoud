@@ -86,9 +86,18 @@ export function backendFixture() {
     if (path === '/chat') {
       if (chatStatus !== 200) return Response.json({ detail: 'Busy' }, { status: chatStatus })
       const conversation = conversations.get(String(body.conversation_id))!
-      const assistant = { id: `${body.request_id}-assistant`, role: 'assistant', content: manualChats ? '' : 'Local reply', status: manualChats ? 'streaming' : 'complete', metrics: manualChats ? null : { elapsed_seconds: 1 }, created_at: '2026-01-01T00:00:00Z' }
+      const accepted = conversation.messages as { request_id?: string; role: string; content: string; status: string; metrics: Record<string, number> | null }[]
+      const existing = accepted.find((message) => message.request_id === body.request_id && message.role === 'assistant')
+      if (existing) return new Response([
+        { type: 'chat.started', request_id: body.request_id },
+        ...(existing.content ? [{ type: 'chat.delta', request_id: body.request_id, text: existing.content }] : []),
+        existing.status === 'complete'
+          ? { type: 'chat.done', request_id: body.request_id, metrics: existing.metrics ?? { elapsed_seconds: 0 } }
+          : { type: 'chat.error', request_id: body.request_id, message: 'This message was already saved. Its partial reply has been kept.' },
+      ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+      const assistant = { id: `${body.request_id}-assistant`, request_id: body.request_id, role: 'assistant', content: manualChats ? '' : 'Local reply', status: manualChats ? 'streaming' : 'complete', metrics: manualChats ? null : { elapsed_seconds: 1 }, created_at: '2026-01-01T00:00:00Z' }
       conversation.messages.push(
-        { id: `${body.request_id}-user`, role: 'user', content: body.messages[0].content, status: 'complete', metrics: null, created_at: '2026-01-01T00:00:00Z' }, assistant,
+        { id: `${body.request_id}-user`, request_id: body.request_id, role: 'user', content: body.messages[0].content, status: 'complete', metrics: null, created_at: '2026-01-01T00:00:00Z' }, assistant,
       )
       conversation.updated_at = stamp()
       if (manualChats) return new Response(new ReadableStream<Uint8Array>({

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { DictationSession, type Connection, type Safety } from '@/lib/dictation-session'
 import type { Snapshot } from '@/lib/protocol'
 import type { ConversationLibrary } from '@/lib/conversations'
@@ -20,5 +20,6 @@ export function useDictation(library: ConversationLibrary) {
     connected: () => { void library.recover() },
   }))
   useEffect(() => session.start(), [session])
-  return { sessionId: session.currentSessionId, connection, snapshot, error, pending, safety, reconnect: () => session.reconnect(), command: (action: 'start' | 'stop', conversationId: string) => session.command(action, conversationId) }
+  const reconnect = useCallback(() => session.reconnect(), [session])
+  return { sessionId: session.currentSessionId, connection, snapshot, error, pending, safety, reconnect, command: (action: 'start' | 'stop', conversationId: string) => session.command(action, conversationId) }
 }

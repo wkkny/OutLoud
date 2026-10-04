@@ -5,6 +5,7 @@ export const messageSchema = z.object({
   id: z.string(), role: z.enum(['user', 'assistant']), content: z.string(),
   status: z.enum(['streaming', 'complete', 'failed', 'cancelled']),
   metrics: z.record(z.string(), z.number()).nullable(), created_at: z.string(),
+  request_id: z.string().nullable().optional(),
 })
 const conversationSchema = z.object({
   id: z.string(), title: z.string(), draft: z.string(), draft_version: z.number().int().nonnegative(),
@@ -27,6 +28,8 @@ export async function request(path: string, init?: RequestInit) {
   }
   return response.status === 204 ? null : response.json()
 }
+type MutationResult = { ok: true } | { ok: false; error: string }
+const failureMessage = (failure: unknown) => failure instanceof Error ? failure.message : 'Local backend is unavailable.'
 const pathFor = (id: string) => `/conversations/${encodeURIComponent(id)}`
 const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 export const SELECTION_KEY = 'outloud.selected-conversation'
@@ -66,7 +69,7 @@ export class ConversationLibrary {
     } catch { /* In-memory editing still works when browser storage is unavailable. */ }
     if (!this.disposed) for (const listener of this.listeners) listener()
   }
-  private fail(failure: unknown) { this.publish({ error: failure instanceof Error ? failure.message : 'Local backend is unavailable.' }) }
+  private fail(failure: unknown) { this.publish({ error: failureMessage(failure) }) }
   async refresh() {
     const sequence = ++this.refreshSequence
     try {
@@ -122,6 +125,8 @@ export class ConversationLibrary {
         }
       }
     }
+    // A successful read is not a successful save of retained local edits.
+    if (existing && draft.text !== draft.base && draft.conflict === null) draft.error = existing.error
     this.publish({
       details: { ...this.view.details, [detail.id]: detail },
       // Only an accepted GET advances history recovery. PATCH responses can
@@ -132,7 +137,7 @@ export class ConversationLibrary {
     })
   }
   select(id: string) { this.publish({ selectedId: id }); void this.load(id) }
-  async create() {
+  async create(): Promise<string | null> {
     try {
       const detail = detailSchema.parse(await request('/conversations', json('POST', {})))
       // Invalidate list requests started before this creation; their snapshots
@@ -140,13 +145,18 @@ export class ConversationLibrary {
       this.refreshSequence++
       this.publish({ list: [detail, ...this.view.list], selectedId: detail.id, error: null })
       this.accept(detail)
-    } catch (failure) { this.fail(failure) }
+      return detail.id
+    } catch (failure) { this.fail(failure); return null }
   }
-  async rename(id: string, title: string) {
-    if (!title.trim()) return
-    try { await request(pathFor(id), json('PATCH', { title: title.trim() })); await this.refresh() } catch (failure) { this.fail(failure) }
+  async rename(id: string, title: string): Promise<MutationResult> {
+    if (!title.trim()) return { ok: false, error: 'A conversation title cannot be empty.' }
+    try {
+      await request(pathFor(id), json('PATCH', { title: title.trim() }))
+      await this.refresh()
+      return { ok: true }
+    } catch (failure) { return { ok: false, error: failureMessage(failure) } }
   }
-  async delete(id: string) {
+  async delete(id: string): Promise<MutationResult> {
     try {
       await request(pathFor(id), { method: 'DELETE' })
       clearTimeout(this.timers.get(id)); this.timers.delete(id)
@@ -154,7 +164,8 @@ export class ConversationLibrary {
       const details = { ...this.view.details }; delete details[id]
       this.publish({ drafts, details, selectedId: this.view.selectedId === id ? null : this.view.selectedId })
       await this.refresh()
-    } catch (failure) { this.fail(failure) }
+      return { ok: true }
+    } catch (failure) { return { ok: false, error: failureMessage(failure) } }
   }
   edit(id: string, text: string) {
     const previous = this.view.drafts[id]

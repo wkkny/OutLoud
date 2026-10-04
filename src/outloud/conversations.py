@@ -44,6 +44,10 @@ class ConversationStore:
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(conversations)")}
         if "draft_version" not in columns:
             self.db.execute("ALTER TABLE conversations ADD COLUMN draft_version INTEGER NOT NULL DEFAULT 0")
+        message_columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
+        if "request_id" not in message_columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN request_id TEXT")
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_by_request ON messages(conversation_id, request_id, role) WHERE request_id IS NOT NULL")
         # No model task survives a backend restart. Retain interrupted turns for
         # recovery, but never include them in subsequent model context.
         self.db.execute("UPDATE messages SET status='failed' WHERE status='streaming'")
@@ -61,7 +65,7 @@ class ConversationStore:
                 return None
             result = dict(row)
             result["messages"] = [dict(message) for message in self.db.execute(
-                "SELECT id, role, content, status, metrics, created_at FROM messages WHERE conversation_id=? ORDER BY rowid",
+                "SELECT id, role, content, status, metrics, created_at, request_id FROM messages WHERE conversation_id=? ORDER BY rowid",
                 (conversation_id,),
             )]
             for message in result["messages"]:
@@ -150,16 +154,24 @@ class ConversationStore:
             ).fetchall()
             return [dict(row) for row in reversed(rows)]
 
-    def start_turn(self, conversation_id, turn_id, content):
+    def request_messages(self, conversation_id, request_id):
+        with self.lock:
+            detail = self.get(conversation_id)
+            return [message for message in detail["messages"] if message["request_id"] == request_id] if detail else []
+
+    def start_turn(self, conversation_id, turn_id, content, request_id=None):
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone() is None:
                 raise LookupError("Conversation not found")
+            if request_id is not None and self.request_messages(conversation_id, request_id):
+                return False
             for role, text in (("user", content), ("assistant", "")):
                 self.db.execute(
-                    "INSERT INTO messages(id,conversation_id,role,content,status,created_at) VALUES(?,?,?,?,?,?)",
-                    (f"{turn_id}-{role}", conversation_id, role, text, "streaming", _now()),
+                    "INSERT INTO messages(id,conversation_id,role,content,status,created_at,request_id) VALUES(?,?,?,?,?,?,?)",
+                    (f"{turn_id}-{role}", conversation_id, role, text, "streaming", _now(), request_id),
                 )
             self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (_now(), conversation_id))
+            return True
 
     def finish_turn(self, conversation_id, turn_id, content, status, metrics=None):
         with self.lock, self.db:

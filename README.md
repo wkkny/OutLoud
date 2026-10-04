@@ -52,6 +52,11 @@ Draft edits are saved automatically. If tabs make conflicting edits, the compose
 keeps your unsaved text and asks you to review both drafts instead of overwriting
 someone else's work.
 
+Text composed before the first chat exists and pending sends are kept in this tab
+across reloads. A recovered send keeps its original request ID for Retry; saved
+history confirms accepted sends without sending them again. Newer composer edits
+are preserved, and interrupted sends are never retried automatically.
+
 Browser Fn/Globe capture, hold-to-record, and double-tap controls are removed.
 Electron-owned shortcuts are a separate future integration; no Electron app is
 included in this implementation.
