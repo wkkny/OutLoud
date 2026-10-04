@@ -1,6 +1,6 @@
 # Packaged study-focused macOS tester release
 
-Status: draft, not published or agent-ready. Product scope is confirmed; the UI layout, technical candidate, proposed test seams and ticket granularity below still need approval. Baseline: merged main `a43edd2`. No production release has been implemented by the prototype work.
+Status: draft, not published or agent-ready. Product scope and B's revision-queue direction are confirmed; the refined prototype, technical candidate, proposed test seams and ticket granularity below still need approval. Baseline: merged main `a43edd2`. No production release has been implemented by the prototype work.
 
 ## Problem Statement
 
@@ -41,7 +41,7 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 27. As a tester, I want a native guided route to install/start Ollama if missing, so I do not need shell instructions.
 28. As a tester, I want model terms and download requirements shown before consent, so I can choose whether to proceed.
 29. As a tester, I want truthful download phases/byte progress, Cancel, Retry and Later, so setup failures are understandable and recoverable.
-30. As a tester, I want chat/study/voice readiness reported separately from backend connectivity, so green status means the relevant capability works.
+30. As a tester, I want unavailable study/chat/voice actions to explain the missing dependency and link to Settings, so I can fix the problem without persistent readiness indicators.
 31. As a tester, I want first recording not to trigger a hidden Whisper download, so model setup is predictable.
 32. As a tester, I want local inference to work after setup without network access, so the local-first claim is meaningful.
 33. As an existing desktop user, I want saved conversations, drafts, study progress, uploads and delivery recovery preserved, so app replacement does not lose work.
@@ -58,7 +58,7 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 - Reuse existing subjects, syllabus, reference material, assessment evidence, topic assessments and revision priorities. Do not replace the assessment rules or imply validated grading accuracy beyond the existing evidence.
 - Preserve app-owned backend ownership, per-user desktop data, independent conversation identity and exclusive microphone ownership.
 - Keep manual organization available before model setup. Disable only actions whose dependencies are unavailable and explain what is missing.
-- Models are excluded from the installer. Download consent and truthful capability readiness are mandatory.
+- Models are excluded from the installer. Download consent and truthful capability checks are mandatory. Checks gate actions internally; they do not become global ready/not-ready badges.
 - Preserve desktop data; browser-development data import is excluded.
 - Sign and notarize before nontechnical distribution. No terminal installation, disabling Gatekeeper or quarantine removal in tester instructions.
 
@@ -73,11 +73,13 @@ Provide an installable Apple Silicon macOS app for a small tester group. It open
 - Use minimal executable-specific entitlements and inside-out native signing. Confirm actual packaged microphone attribution and hardened runtime loads before adding exceptions.
 - Keep unchanged assessment rules: sufficient independent supported evidence for established understanding; hinted answers do not establish it; unsupported feedback remains provisional; changes to coverage/reference/evidence invalidate dependent judgments.
 
-### UI candidate, awaiting learner selection
+### Selected UI direction
 
-- Three runnable layouts are available: Study dashboard, Revision queue and Subject notebook.
-- Suggested synthesis: dashboard home with an optional notebook-style reference/evidence panel during study.
-- Preserve one question at a time and keep management/evidence details in controlled panels. The prototype code is not production code and must be rewritten against real endpoints and accessible components.
+- Use B's Revision queue, with an expanded desktop sidebar showing Study, Chat, subjects and New subject. Pin Settings at the bottom independently of subject-list scrolling.
+- Use the selected subject name as the home heading, distinguish assessed coverage from demonstrated understanding, and keep one next-topic action above the ordered revision queue. Do not repeat subject navigation in tabs.
+- No persistent readiness indicators, Local badge, decorative eyebrow headings, motivational slogans or static study-step strip. Every heading identifies content. Additional text must explain an action, result, evidence or recoverable error.
+- Keep setup in Settings. Show missing dependencies or connection failures only where they affect an attempted/available action; retain download progress, consent, cancellation and explicit retries.
+- Preserve one question at a time and keep management/evidence details in controlled panels. Minimal copy must retain provisional-feedback and assisted/independent distinctions. The prototype code is not production code and must be rewritten against real endpoints and accessible components.
 
 ## Testing Decisions
 
@@ -113,7 +115,7 @@ Release acceptance includes a populated current-desktop upgrade fixture, an inte
 |---|---|---|---|
 | 1 | Launch the production desktop UI with a bundled backend | None | An internal arm64 app opens outside the checkout, saves a conversation and shuts down/reopens its owned backend without developer tools. |
 | 2 | Preserve existing desktop data across packaged upgrades | 1 | A populated current desktop fixture keeps conversations, profile drafts, subjects/progress and pending delivery; failed/unsupported upgrades never reset data. |
-| 3 | Open to Study home and resume a saved topic | None | Approved home/navigation shows real subjects, distinct progress counts and revision priorities; manual subject/topic creation works without models, and ordinary Chat stays available. |
+| 3 | Open to Study home and resume a saved topic | None | B's minimal revision-queue home uses an expanded sidebar with bottom Settings, no readiness indicators or decorative headings, real subjects, distinct progress counts and revision priorities. Manual subject/topic creation works without models; ordinary Chat stays available. |
 | 4 | Study a topic in the focused shared voice/text workspace | 3 | Real topic resume, one question, reviewed composer, honest feedback, assisted/independent evidence and finish/retry flows work in the selected layout. |
 | 5 | Guide Ollama setup and enable validated local chat/study | 1 | Native install/reuse guidance, consented Gemma pull, truthful progress/cancel/retry/later, and validated local chat/study readiness work without terminal commands or service takeover. |
 | 6 | Set up Whisper and dictate from the packaged app | 1 | Consented verified voice-model setup, OutLoud microphone consent/denial recovery, real dictation to the correct draft, and independent recording/generation controls work. |
@@ -121,4 +123,4 @@ Release acceptance includes a populated current-desktop upgrade fixture, an inte
 | 8 | Produce a traceable signed/notarized arm64 installer | 1 | A versioned app/DMG has audited runtime notices/source provenance, consistent native signatures, notarization and stapling; no untrusted workarounds required. |
 | 9 | Validate the combined tester release on a clean Mac | 2, 4, 5, 6, 7, 8 | A nontechnical tester installs the final signed artifact, organizes subjects before setup, studies/dictates, uses ordinary Chat, works offline after setup, and reopens with data intact. |
 
-Approve or adjust the layout, candidate architecture, test seams and ticket breakdown before publishing GitHub issues. Tickets must link to the preserved prototype commit and use native dependency edges; the final tester release stays blocked until all hard gates have actual evidence.
+Approve or adjust the refined B prototype, candidate architecture, test seams and ticket breakdown before publishing GitHub issues. Tickets must link to the preserved prototype commit and use native dependency edges; the final tester release stays blocked until all hard gates have actual evidence.
