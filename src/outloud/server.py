@@ -195,7 +195,14 @@ class ClientConnection:
                 for event in batch:
                     if not self.active:
                         return
-                    await self.send(event)
+                    try:
+                        await self.send(event)
+                    except sqlite3.Error:
+                        # The inbox still owns this transcript. A failed draft
+                        # write must not close the tab's event connection; a later
+                        # reconnect/replay can commit it and notify this tab.
+                        logger.exception('Could not recover transcript into saved draft')
+                        self.deliver({'type': 'transcription.error', 'message': 'Transcript is saved but the draft could not be updated. Reconnect to retry.'})
 
     async def watch_lease(self):
         while True:
