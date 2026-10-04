@@ -1,5 +1,6 @@
 import os
 import queue
+import struct
 import unittest
 import wave
 from pathlib import Path
@@ -33,6 +34,32 @@ class RecorderTests(unittest.TestCase):
     def capture(self):
         callback = self.create_stream.call_args.kwargs["callback"]
         callback(b"\x00\x00" * 160, 160, None, None)
+
+    def test_level_measures_rms_of_captured_pcm_and_preserves_audio(self):
+        self.recorder.start()
+        callback = self.create_stream.call_args.kwargs["callback"]
+        pcm = struct.pack("4h", 0, 0, 16384, -16384)
+        callback(pcm, 4, None, None)
+        self.assertAlmostEqual(self.recorder.read_level(), 0.3535533905932738)
+        with wave.open(str(self.recorder.stop())) as audio:
+            self.assertEqual(audio.readframes(4), pcm)
+
+    def test_level_retains_peak_since_read_and_resets_between_recordings(self):
+        self.assertEqual(self.recorder.read_level(), 0.0)
+        self.recorder.start()
+        callback = self.create_stream.call_args.kwargs["callback"]
+        callback(struct.pack("2h", -32768, -32768), 2, None, None)
+        self.capture()
+        self.assertEqual(self.recorder.read_level(), 1.0)
+        self.assertEqual(self.recorder.read_level(), 0.0)
+        callback(struct.pack("2h", 16384, -16384), 2, None, None)
+        self.recorder.stop()
+        self.assertEqual(self.recorder.read_level(), 0.0)
+        self.recorder.start()
+        self.assertEqual(self.recorder.read_level(), 0.0)
+        self.capture()
+        callback(b"", 0, None, None)
+        self.assertEqual(self.recorder.read_level(), 0.0)
 
     def test_creation_failure_removes_empty_attempt_and_allows_retry(self):
         self.create_stream.side_effect = RuntimeError("permission denied")
@@ -101,6 +128,50 @@ class RecorderTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_worker_drops_invalid_levels_without_interrupting_capture(self):
+        for level in (float("nan"), float("inf"), -0.1, 1.1, True, "0.5", None):
+            with self.subTest(level=level):
+                recorder = MagicMock()
+                recorder.path = Path("recording-one/audio.wav")
+                recorder.stop.return_value = None
+                recorder.read_level.return_value = level
+                events = queue.Queue()
+                events.put({"action": "hands-free", "timestamp": 0,
+                            "session_id": "owner", "conversation_id": "chat"})
+                events.put(None)
+                published = []
+                recording_worker(events, queue.Queue(), published.append, recorder)
+                self.assertFalse(any(event["type"] == "recording.level" for event in published))
+                self.assertFalse(published[-1]["recording"])
+
+    def test_worker_samples_levels_at_bounded_cadence_only_while_recording(self):
+        recorder = MagicMock()
+        recorder.path = Path("recording-one/audio.wav")
+        recorder.stop.return_value = None
+        recorder.read_level.side_effect = [0.25, 0.5, 0.75]
+        start = {"action": "hands-free", "timestamp": 0.01,
+                 "session_id": "owner", "conversation_id": "chat"}
+        stop = {**start, "action": "stop", "timestamp": 0.14}
+        sequence = iter([(0, "tick"), (0.01, start), (0.02, start),
+                         (0.03, "tick"), (0.07, "tick"), (0.13, "tick"),
+                         (0.14, stop), (0.20, "tick"), (0.30, None)])
+        now = 0
+
+        def next_event(**kwargs):
+            nonlocal now
+            now, event = next(sequence)
+            return event
+
+        events = MagicMock()
+        events.get.side_effect = next_event
+        published = []
+        with patch("outloud.app.time.monotonic", side_effect=lambda: now):
+            recording_worker(events, queue.Queue(), published.append, recorder)
+        self.assertEqual([event for event in published if event["type"] == "recording.level"], [
+            {"type": "recording.level", "recording_id": "recording-one", "session_id": "owner", "level": level}
+            for level in (0.25, 0.5, 0.75)
+        ])
+
     def run_worker(self, recorder, sequence):
         events = queue.Queue()
         recordings = queue.Queue()

@@ -32,6 +32,9 @@
 .send-shortcut { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-left: auto; font-size: 11px; color: var(--muted-foreground); }
 .send-shortcut span { margin-left: 4px; }
 .recording-controls { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.voice-level { display: flex; flex-shrink: 0; align-items: center; gap: 2px; height: 24px; color: var(--destructive); }
+.voice-level > span { width: 3px; border-radius: 999px; background: currentColor; transition: height 80ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .voice-level > span { transition: none; } }
 .recording-hint { font-size: 11px; line-height: 1.4; color: var(--muted-foreground); overflow-wrap: anywhere; }
 @media (min-width: 768px) {
   /* Keep the toggle under the cursor while the sidebar and main header move. */

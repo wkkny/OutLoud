@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, systemPreferences } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { BackendProcess } from './backend-process.js'
 import { DesktopSession } from './desktop-session.js'
 import type { DesktopState } from './desktop-state.js'
+import { MicrophonePermission } from './microphone-permission.js'
 
 const root = fileURLToPath(new URL('../../../', import.meta.url))
 const controlPage = fileURLToPath(new URL('../src/control.html', import.meta.url))
@@ -15,6 +16,12 @@ let session: DesktopSession | null = null
 let quitting = false
 let showingChat = false
 let forceConfirmationOpen = false
+const microphonePermission = new MicrophonePermission({
+  platform: process.platform,
+  getStatus: () => systemPreferences.getMediaAccessStatus('microphone'),
+  request: () => systemPreferences.askForMediaAccess('microphone'),
+  openExternal: (url) => shell.openExternal(url),
+})
 
 app.setName('OutLoud')
 const dataDirectory = app.commandLine.getSwitchValue('user-data-dir') || join(app.getPath('appData'), 'OutLoud')
@@ -125,6 +132,20 @@ function isControlSender(event: Electron.IpcMainInvokeEvent) {
   return window && event.sender === window.webContents &&
     event.senderFrame?.url === controlUrl && event.senderFrame === event.sender.mainFrame
 }
+
+function isChatSender(event: Electron.IpcMainInvokeEvent) {
+  return window && session?.state.phase === 'running' && event.sender === window.webContents &&
+    event.senderFrame?.url === `${uiUrl}/` && event.senderFrame === event.sender.mainFrame
+}
+
+ipcMain.handle('desktop:microphone-permission', (event) => {
+  if (!isChatSender(event)) throw new Error('Active desktop chat required')
+  return microphonePermission.request()
+})
+ipcMain.handle('desktop:microphone-settings', (event) => {
+  if (!isChatSender(event)) throw new Error('Active desktop chat required')
+  return microphonePermission.openSettings()
+})
 
 ipcMain.handle('desktop:state', (event) => {
   if (!isControlSender(event)) throw new Error('Desktop control page required')

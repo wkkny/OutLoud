@@ -10,9 +10,16 @@ from .app import recording_worker
 from .capacity import CapacityUnavailable
 from .delivery import TranscriptInbox
 from .fn_shortcut import FnShortcut
+from .recording import is_valid_level
 from .transcription import transcription_worker
 
 logger = logging.getLogger(__name__)
+
+
+def is_valid_recording_level(event):
+    return (is_valid_level(event.get("level"))
+            and all(isinstance(event.get(key), str) and event[key]
+                    for key in ("recording_id", "session_id")))
 
 
 class RuntimeUnavailable(RuntimeError):
@@ -149,6 +156,11 @@ class RecordingRuntime:
 
     def publish(self, event):
         event_type = event["type"]
+        if event_type == "recording.level":
+            # Ephemeral capture telemetry never changes durable/snapshot state.
+            if is_valid_recording_level(event):
+                self.notify(event)
+            return
         # Disk commits belong to the transcription thread, outside the lock used
         # by native key callbacks and recording commands.
         deliver = event_type != "transcription.completed" or self.transcripts.remember(event)

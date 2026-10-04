@@ -1,11 +1,19 @@
 import uuid
 import wave
+import math
+import threading
+from array import array
 from datetime import datetime
 from pathlib import Path
 
 import sounddevice as sd
 
 SAMPLE_RATE = 16000
+
+
+def is_valid_level(level):
+    return (isinstance(level, (int, float)) and not isinstance(level, bool)
+            and 0 <= level <= 1 and math.isfinite(level))
 
 
 class RecordingError(RuntimeError):
@@ -21,10 +29,20 @@ class Recorder:
         self.path = None
         self.frames = 0
         self.callback_error = None
+        self.level_lock = threading.Lock()
+        self.level = 0.0
+
+    def read_level(self):
+        """Return the highest block RMS since the previous read, then clear it."""
+        with self.level_lock:
+            level = self.level
+            self.level = 0.0
+        return level
 
     def start(self):
         self.frames = 0
         self.callback_error = None
+        self.read_level()
         try:
             name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             folder = Path("recordings") / f"{name}_{uuid.uuid4().hex[:8]}"
@@ -39,8 +57,15 @@ class Recorder:
                 if status:
                     print(f"Audio warning: {status}", flush=True)
                 try:
-                    self.audio_file.writeframesraw(bytes(data))
+                    pcm = bytes(data)
+                    self.audio_file.writeframesraw(pcm)
                     self.frames += frames
+                    samples = array("h", pcm)
+                    if samples:
+                        # Python integers avoid overflow when squaring int16 PCM.
+                        level = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768.0
+                        with self.level_lock:
+                            self.level = max(self.level, level)
                 except Exception as error:
                     self.callback_error = error
                     raise sd.CallbackAbort from error
@@ -96,6 +121,7 @@ class Recorder:
         self.stream = None
         self.audio_file = None
         self.path = None
+        self.read_level()
         if path is not None and self.frames > 0 and finalized:
             print(f"Saved: {path}", flush=True)
             return path

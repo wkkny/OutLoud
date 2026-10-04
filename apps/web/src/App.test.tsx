@@ -34,8 +34,11 @@ it('keeps routine composer copy quiet but shows unsaved changes until the save c
   expect(screen.queryByText('Your draft is saved locally')).not.toBeInTheDocument()
   expect(screen.queryByText('Audio and conversations stay on this Mac')).not.toBeInTheDocument()
   expect(screen.queryByText('Whisper transcription · Gemma chat runs locally')).not.toBeInTheDocument()
-  expect(screen.getByText('⌘ / Ctrl')).toBeVisible()
+  expect(screen.getByText('Gemma 3:4b')).toBeVisible()
+  expect(screen.queryByText('· local')).not.toBeInTheDocument()
+  expect(screen.queryByText('⌘ / Ctrl')).not.toBeInTheDocument()
   expect(screen.getByText('Enter')).toBeVisible()
+  expect(screen.getByText('to send · Shift+Enter for a new line')).toBeVisible()
   const composer = screen.getByRole('textbox', { name: 'Your text' })
   expect(composer).not.toHaveAccessibleDescription()
   const baseFetch = backend.fetchMock.getMockImplementation()!
@@ -69,13 +72,13 @@ it('puts a suggested prompt in the draft for review without sending or replacing
   expect(screen.getByRole('button', { name: 'Brainstorm ideas' })).toBeDisabled()
 })
 
-it('keeps Enter as a newline and sends a reviewed draft only with Ctrl or Cmd+Enter', async () => {
+it('sends with Enter while preserving Shift+Enter and IME composition', async () => {
   await open()
   const composer = screen.getByRole('textbox', { name: 'Your text' })
-  fireEvent.keyDown(composer, { key: 'Enter' })
-  fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true, isComposing: true })
+  expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true)
+  expect(fireEvent.keyDown(composer, { key: 'Enter', isComposing: true })).toBe(true)
   expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(0)
-  fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true })
+  expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
   await screen.findByText('Local reply')
   expect(backend.requests.filter((request) => request.path === '/chat')).toHaveLength(1)
 })
