@@ -248,3 +248,101 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(response.json()['pages'], [1])
         self.assertEqual(invalid.status_code, 422)
         self.assertEqual(len(self.requests), 0)
+
+    def test_narrowing_an_all_topic_reference_requires_reassessment_for_removed_topics(self):
+        subject = self.create_subject()
+        source = self.client.post(f"/study/subjects/{subject['id']}/references", json={'name': 'Exam notes', 'text': 'DBMS reference for all topics.'}).json()['id']
+        topic = subject['topics'][1]
+        conversation = self.client.post(f"/study/subjects/{subject['id']}/topics/{topic['id']}/conversations").json()['conversation_id']
+        async def supported(request):
+            return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct.', 'question': 'Apply it.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
+        self.handler = supported
+        for attempt in range(2):
+            with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+                self.send(socket, conversation, 'Independent answer', f'scope-{attempt}')
+        self.assertEqual(self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][1]['judgment'], 'demonstrated')
+        self.client.patch(f'/study/uploads/{source}', json={'text': 'DBMS reference for all topics.', 'topic_ids': [subject['topics'][0]['id']]})
+        saved = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][1]
+        self.assertEqual(saved['judgment'], 'not_assessed')
+        self.assertTrue(saved['needs_reassessment'])
+
+    def test_deleted_dependency_invalidates_progress_and_new_independent_answers_recover(self):
+        for deletion in ('conversation', 'reference'):
+            with self.subTest(deletion=deletion):
+                subject = self.create_subject()
+                first_source, second_source = self.reference(subject), self.reference(subject)
+                first, second = self.study_conversation(subject), self.study_conversation(subject)
+                cited = first_source
+                async def supported(request):
+                    return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct.', 'question': 'Apply 3NF to your own example.', 'judgment': 'demonstrated', 'confident': True, 'sources': [cited], 'gaps': []})}, 'done': True}) + '\n')
+                self.handler = supported
+                with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+                    self.send(socket, first, 'My independent definition.', f'{deletion}-first')
+                cited = second_source
+                with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+                    self.send(socket, second, 'My independent application.', f'{deletion}-second')
+                self.assertEqual(self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['judgment'], 'demonstrated')
+                path = f'/conversations/{first}' if deletion == 'conversation' else f'/study/uploads/{first_source}'
+                self.assertEqual(self.client.delete(path).status_code, 204)
+                invalidated = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]
+                self.assertEqual(invalidated['judgment'], 'not_assessed')
+                self.assertTrue(invalidated['needs_reassessment'])
+                for attempt in range(2):
+                    with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+                        self.send(socket, second, 'Fresh independent answer.', f'{deletion}-fresh-{attempt}')
+                    judgment = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['judgment']
+                    self.assertEqual(judgment, 'partial' if attempt == 0 else 'demonstrated')
+
+    def test_chat_and_image_extraction_share_the_model_capacity_limit(self):
+        import asyncio
+        import io
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from PIL import Image
+        self.client.__exit__(None, None, None)
+        with patch.dict('os.environ', {'OUTLOUD_MAX_CHAT_GENERATIONS': '1'}):
+            self.client = self.open_client()
+        subject = self.create_subject()
+        conversation = self.study_conversation(subject)
+        image = io.BytesIO()
+        Image.new('RGB', (32, 32), 'white').save(image, format='PNG')
+        entered, release = threading.Event(), threading.Event()
+        async def held(request):
+            payload = json.loads(request.content)
+            entered.set()
+            await asyncio.to_thread(release.wait, 5)
+            if payload['messages'][-1].get('images'):
+                return httpx2.Response(200, json={'message': {'content': '{"text":"Printed notes"}'}, 'done': True})
+            return await self.reply(request)
+        self.handler = held
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            def chat():
+                return self.client.post('/chat', headers=headers, json={'conversation_id': conversation, 'request_id': __import__('uuid').uuid4().hex, 'messages': [{'role': 'user', 'content': 'My reviewed answer'}]})
+            def upload():
+                return self.client.post(f"/study/subjects/{subject['id']}/uploads?name=notes.png&role=reference", headers=headers, content=image.getvalue())
+            for start, rejected in ((chat, upload), (upload, chat)):
+                entered.clear(); release.clear()
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    pending = executor.submit(start)
+                    try:
+                        self.assertTrue(entered.wait(3), 'Model request did not start')
+                        response = rejected()
+                        self.assertEqual(response.status_code, 429, response.text)
+                    finally:
+                        release.set()
+                    self.assertIn(pending.result(timeout=5).status_code, (200, 201))
+
+    def test_interrupted_guidance_retains_its_action_across_restart(self):
+        subject = self.create_subject()
+        conversation = self.study_conversation(subject)
+        async def incomplete(request):
+            return httpx2.Response(200, content=json.dumps({'message': {'content': '{"feedback":'}, 'done': False}) + '\n')
+        self.handler = incomplete
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            self.send(socket, conversation, 'Give me a fresh practice question.', 'practice-interrupted', 'practice')
+        self.client.__exit__(None, None, None)
+        self.client = self.open_client()
+        session = self.client.get(f'/study/conversations/{conversation}').json()
+        self.assertEqual(session['last_action'], 'practice')
+        self.assertEqual(session['topic']['history'], [])

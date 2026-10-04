@@ -5,6 +5,7 @@ import time
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from typing import Literal
 
 import anyio
@@ -131,12 +132,25 @@ class Chat:
         self.on_change = on_change or (lambda conversation_id: None)
         self.max_concurrent = max_concurrent
         self.active = {}
+        self.model_reservations = 0
+
+    @contextmanager
+    def reserve_model(self):
+        self.check_capacity()
+        self.model_reservations += 1
+        try:
+            yield
+        finally:
+            self.model_reservations -= 1
+
+    def check_capacity(self):
+        if len(self.active) + self.model_reservations >= self.max_concurrent:
+            raise ChatCapacityBusy('Gemma is busy. Wait for a reply or extraction to finish, then retry.')
 
     def start(self, session_id, request):
         if request.conversation_id in self.active:
             raise ChatBusy("This conversation is already generating a reply. Stop it or wait, then try again.")
-        if len(self.active) >= self.max_concurrent:
-            raise ChatCapacityBusy("Gemma is busy with other conversations. Wait for a reply to finish, then retry.")
+        self.check_capacity()
         generation = Generation(session_id, request)
         self.active[request.conversation_id] = generation
         generation.task = asyncio.create_task(self.generate(generation))
@@ -212,7 +226,7 @@ class Chat:
                 payload['format'] = StudyReply.model_json_schema()
                 payload['options']['temperature'] = 0
                 # Save a reviewed study answer before waiting for model feedback.
-                inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id)
+                inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id, lambda: self.study.begin_attempt(study_plan))
                 if not inserted:
                     terminal = await self.replay(generation, await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id))
                     return

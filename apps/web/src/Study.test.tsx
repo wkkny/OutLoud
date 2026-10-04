@@ -62,3 +62,31 @@ it('keeps dictated study answers in the reviewed draft until the learner sends',
   await screen.findByText('Local reply')
   expect(backend.requests.find(request => request.path === '/chat')?.body.messages).toEqual([{ role: 'user', content: 'Saved words\nMy spoken explanation' }])
 })
+
+it.each([
+  ['failed', 'explain', 'Explain the gap in my understanding.'],
+  ['cancelled', 'practice', 'Give me a fresh practice question.'],
+  ['failed', 'finish', 'Summarize my study progress and revision priorities.'],
+] as const)('retries %s study feedback with its saved %s action and preserves the reviewed draft', async (status, action, text) => {
+  const topic = { id: 'topic-1', name: 'Normalization', coverage: '', weight: null, active: 1, revision: 1, judgment: 'not_assessed', assessment: null, history: [], needs_reassessment: false }
+  const subject = { id: 'subject-1', name: 'DBMS', exam_type: 'written', level: '', exam_date: '', topics: [topic], uploads: [], revision_order: ['topic-1'], coverage: { total: 1, assessed: 0, demonstrated: 0 } }
+  backend.conversations.get('chat-1')!.messages = [
+    { id: 'old-user', request_id: 'interrupted', role: 'user', content: text, status, metrics: null, created_at: '2026-10-04' },
+    { id: 'old-assistant', request_id: 'interrupted', role: 'assistant', content: '', status, metrics: null, created_at: '2026-10-04' },
+  ]
+  const baseFetch = backend.fetchMock.getMockImplementation()!
+  backend.fetchMock.mockImplementation(async (url, init) => {
+    if (new URL(String(url)).pathname === '/study/conversations/chat-1') return Response.json({ conversation_id: 'chat-1', question: 'Explain normalization.', hinted: 0, finished: 0, last_action: action, topic, subject })
+    return baseFetch(url, init)
+  })
+  render(<App />)
+  await waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+  await act(async () => FakeSocket.instances[0]!.ready())
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry feedback' }))
+  await screen.findByText('Local reply')
+  const request = backend.requests.find(request => request.path === '/chat')!
+  expect(request.body.study_action).toBe(action)
+  expect(request.body.messages).toEqual([{ role: 'user', content: text }])
+  expect(request.body.request_id).not.toBe('interrupted')
+  expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
+})

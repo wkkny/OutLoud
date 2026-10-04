@@ -9,6 +9,7 @@ from urllib.parse import quote
 from .study import TopicInput
 from .study_uploads import MAX_FILE_BYTES
 from .study import SubjectInput
+from .chat import ChatCapacityBusy
 
 
 class UploadReview(BaseModel):
@@ -71,6 +72,8 @@ def study_router(app, complete_write, require_client):
             text, page_count, selected = await app.state.study_extractor.extract(bytes(data), selected)
             result = await complete_write(read(app.state.study.add_upload, subject_id, name, role, bytes(data), text, selected))
             return {**result, 'page_count': page_count}
+        except ChatCapacityBusy as error:
+            raise HTTPException(429, str(error)) from error
         except (ValueError, KeyError, TypeError) as error:
             raise HTTPException(422, str(error)) from error
         except (httpx2.HTTPError, TimeoutError) as error:

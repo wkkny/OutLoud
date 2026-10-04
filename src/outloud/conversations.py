@@ -162,7 +162,7 @@ class ConversationStore:
             detail = self.get(conversation_id)
             return [message for message in detail["messages"] if message["request_id"] == request_id] if detail else []
 
-    def start_turn(self, conversation_id, turn_id, content, request_id=None):
+    def start_turn(self, conversation_id, turn_id, content, request_id=None, on_start=None):
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone() is None:
                 raise LookupError("Conversation not found")
@@ -173,6 +173,8 @@ class ConversationStore:
                     "INSERT INTO messages(id,conversation_id,role,content,status,created_at,request_id) VALUES(?,?,?,?,?,?,?)",
                     (f"{turn_id}-{role}", conversation_id, role, text, "streaming", _now(), request_id),
                 )
+            if on_start is not None:
+                on_start()
             self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (_now(), conversation_id))
             return True
 

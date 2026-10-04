@@ -343,7 +343,7 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         app.state.runtime = runtime
         app.state.conversations = await asyncio.to_thread(ConversationStore, conversations_path)
         app.state.study = StudyStore(app.state.conversations)
-        app.state.study_extractor = UploadExtractor(chat.client_factory)
+        app.state.study_extractor = UploadExtractor(chat.client_factory, chat.reserve_model)
         chat.study = app.state.study
         chat.store = app.state.conversations
         chat.on_change = conversation_changed

@@ -65,6 +65,9 @@ class StudyStore:
             columns = {row[1] for row in self.db.execute('PRAGMA table_info(study_topics)')}
             if 'reassessment' not in columns:
                 self.db.execute('ALTER TABLE study_topics ADD COLUMN reassessment INTEGER NOT NULL DEFAULT 0')
+            session_columns = {row[1] for row in self.db.execute('PRAGMA table_info(study_sessions)')}
+            if 'last_action' not in session_columns:
+                self.db.execute("ALTER TABLE study_sessions ADD COLUMN last_action TEXT NOT NULL DEFAULT 'answer'")
             conversations.on_delete = self.before_delete_conversation
 
     def list(self):
@@ -79,12 +82,10 @@ class StudyStore:
             result = dict(row)
             result['topics'] = [{**dict(topic), 'judgment': 'not_assessed', 'assessment': None, 'needs_reassessment': False} for topic in self.db.execute('SELECT * FROM study_topics WHERE subject_id=? ORDER BY position', (subject_id,))]
             result['uploads'] = self.uploads(subject_id)
-            approved = {item['id'] for item in result['uploads'] if item['approved']}
             for topic in result['topics']:
                 evidence = self.evidence(topic['id'])
                 topic['history'] = evidence
-                available = {item['user_message_id'] for item in evidence}
-                eligible = [item for item in evidence if item['revision'] == topic['revision'] and set(item['result']['sources']).issubset(approved) and set(item['result'].get('evidence_ids', [])).issubset(available)]
+                eligible = self.valid_evidence(topic, evidence, result['uploads'])
                 scored = [item for item in eligible if not item['result']['provisional'] and item['action'] == 'answer']
                 latest = scored[-1] if scored else eligible[-1] if eligible else None
                 if latest:
@@ -188,7 +189,8 @@ class StudyStore:
                         self.db.execute('INSERT INTO study_topics(id,subject_id,name,coverage,weight,position) VALUES(?,?,?,?,?,?)', (str(uuid.uuid4()), subject['id'], topic.name, topic.coverage, topic.weight, len(names)))
                         names.add(topic.name.casefold())
             if upload['approved'] and (upload['text'] != text or json.loads(upload['topic_ids']) != topic_ids):
-                affected = set(json.loads(upload['topic_ids'])) | set(topic_ids)
+                all_topics = {topic['id'] for topic in subject['topics']}
+                affected = (set(json.loads(upload['topic_ids'])) or all_topics) | (set(topic_ids) or all_topics)
                 for topic in subject['topics']:
                     if not affected or topic['id'] in affected:
                         self.db.execute('UPDATE study_topics SET revision=revision+1 WHERE id=?', (topic['id'],))
@@ -201,6 +203,23 @@ class StudyStore:
             return [{**dict(row), 'result': json.loads(row['result'])} for row in self.db.execute(
                 'SELECT e.*,m.content AS answer,m.conversation_id FROM study_evidence e JOIN messages m ON m.id=e.user_message_id WHERE e.topic_id=? ORDER BY e.rowid', (topic_id,))]
 
+    @staticmethod
+    def applicable_references(topic_id, uploads):
+        return [upload for upload in uploads if upload['approved'] and upload['role'] == 'reference' and (not upload['topic_ids'] or topic_id in upload['topic_ids'])]
+
+    def valid_evidence(self, topic, evidence, uploads):
+        sources = {upload['id'] for upload in self.applicable_references(topic['id'], uploads)}
+        eligible, valid_ids = [], set()
+        # Evidence only depends on earlier completed answers and itself. Checking
+        # in save order validates the whole dependency chain without recursion.
+        for item in evidence:
+            own_id = item['user_message_id']
+            dependencies = set(item['result'].get('evidence_ids', [])) - {own_id}
+            if item['revision'] == topic['revision'] and set(item['result']['sources']).issubset(sources) and dependencies.issubset(valid_ids):
+                eligible.append(item)
+                valid_ids.add(own_id)
+        return eligible
+
     def prepare(self, conversation_id, action):
         with self.lock:
             session = self.session(conversation_id)
@@ -210,23 +229,28 @@ class StudyStore:
             if not topic['active']:
                 raise ValueError('Topic was removed from the active syllabus. Choose an active topic.')
             references, remaining = [], 4000
-            for upload in subject['uploads']:
-                if upload['approved'] and upload['role'] == 'reference' and (not upload['topic_ids'] or topic['id'] in upload['topic_ids']):
-                    text = upload['text'][:min(2000, remaining)]
-                    if text:
-                        references.append({'id': upload['id'], 'name': upload['name'] + ' pages ' + ','.join(map(str, upload['pages'])), 'text': text})
-                        remaining -= len(text)
-            prior = [item for item in topic['history'] if item['revision'] == topic['revision'] and item['action'] == 'answer' and not item['hinted'] and not item['result']['provisional'] and set(item['result']['sources']).issubset({ref['id'] for ref in references})]
+            for upload in self.applicable_references(topic['id'], subject['uploads']):
+                text = upload['text'][:min(2000, remaining)]
+                if text:
+                    references.append({'id': upload['id'], 'name': upload['name'] + ' pages ' + ','.join(map(str, upload['pages'])), 'text': text})
+                    remaining -= len(text)
+            prior = [item for item in self.valid_evidence(topic, topic['history'], subject['uploads']) if item['action'] == 'answer' and not item['hinted'] and not item['result']['provisional'] and set(item['result']['sources']).issubset({ref['id'] for ref in references})]
             return {'conversation_id': conversation_id, 'topic_id': topic['id'], 'revision': topic['revision'], 'topic': topic['name'], 'coverage': topic['coverage'][:1000], 'exam_type': subject['exam_type'], 'level': subject['level'], 'action': action, 'question': session['question'], 'hinted': bool(session['hinted']), 'references': references, 'independent_count': len(prior), 'previous_evidence': list({evidence_id for item in prior[-2:] for evidence_id in [item['user_message_id'], *item['result'].get('evidence_ids', [])]}), 'previous_answers': [{'question': item['question'], 'answer': item['answer'][:800]} for item in prior[-2:]], 'topic_progress': [{'name': item['name'], 'judgment': item['judgment'], 'exam_importance': item['weight']} for item in subject['topics'] if item['active']][:10], 'subject_coverage': subject['coverage']}
+
+    def begin_attempt(self, plan):
+        # Shares the accepted user turn's transaction, including interrupted turns.
+        self.db.execute('UPDATE study_sessions SET last_action=? WHERE conversation_id=?', (plan['action'], plan['conversation_id']))
 
     def complete(self, plan, result, user_message_id):
         # Called inside the conversation's completion transaction and lock.
-        topic = self.db.execute('SELECT revision,active FROM study_topics WHERE id=?', (plan['topic_id'],)).fetchone()
+        topic = self.db.execute('SELECT * FROM study_topics WHERE id=?', (plan['topic_id'],)).fetchone()
         session = self.db.execute('SELECT 1 FROM study_sessions WHERE conversation_id=?', (plan['conversation_id'],)).fetchone()
         if topic is None or session is None:
             return
-        current_sources = {row[0] for row in self.db.execute('SELECT id FROM study_uploads WHERE approved=1 AND role=?', ('reference',))}
-        if topic['revision'] != plan['revision'] or not topic['active'] or not set(result['sources']).issubset(current_sources):
+        uploads = self.uploads(topic['subject_id'])
+        current_sources = {upload['id'] for upload in self.applicable_references(topic['id'], uploads)}
+        valid_ids = {item['user_message_id'] for item in self.valid_evidence(topic, self.evidence(topic['id']), uploads)}
+        if topic['revision'] != plan['revision'] or not topic['active'] or not set(result['sources']).issubset(current_sources) or not set(plan['previous_evidence']).issubset(valid_ids):
             result = {**result, 'judgment': 'not_assessed', 'gaps': [], 'provisional': True}
         result = {**result, 'evidence_ids': [*plan['previous_evidence'], user_message_id]}
         self.db.execute('INSERT INTO study_evidence VALUES(?,?,?,?,?,?,?,?)', (user_message_id, plan['topic_id'], plan['revision'], now(), plan['question'], plan['action'], plan['hinted'], json.dumps(result)))
