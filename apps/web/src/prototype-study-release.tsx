@@ -12,7 +12,7 @@ type Mode = 'Study' | 'Chat'
 type Readiness = 'ready' | 'missing' | 'downloading' | 'error' | 'offline'
 type Topic = { name: string; status: 'Needs revision' | 'Partial understanding' | 'Not assessed' | 'Demonstrated understanding'; weight: number | null; evidence: number }
 type Subject = { name: string; topics: Topic[]; reference: string; approved: boolean }
-type Turn = { id: string; mode: Mode; topic: string | null; question: string; answer: string; reply: string; assisted: boolean; provisional: boolean; failed: boolean; guidanceTopics: string[] }
+type Turn = { id: string; mode: Mode; topic: string | null; question: string; requestedQuestion?: string; answer: string; reply: string; assisted: boolean; provisional: boolean; failed: boolean; guidanceTopics: string[] }
 type Conversation = { id: string; subject: string; title: string; saved: boolean; mode: Mode; selectedTopics: string[]; activeTopic: string | null; questions: Record<string, string>; assistedTopics: string[]; draft: string; turns: Turn[]; finished: boolean }
 const variants: Record<Variant, string> = { A: 'Study dashboard', B: 'Revision queue', C: 'Subject notebook' }
 const dbms = 'Database Management Systems'
@@ -70,7 +70,6 @@ export default function StudyReleasePrototype() {
   const [topicSelection, setTopicSelection] = useState<string[]>([])
   const ready = readiness === 'ready'
   const modelMessage = readiness === 'offline' ? 'Connection lost. Your draft stays here.' : readiness === 'downloading' ? `Downloading models · ${progress}%` : readiness === 'error' ? 'Download interrupted. Retry in settings.' : 'Install the local model to continue.'
-  const activeTopic = subject.topics.find(item => item.name === current?.activeTopic)
   const subjectConversations = conversations.filter(item => item.subject === subject.name && item.saved)
   const nextTopic = subject.topics[0]
   const assessed = subject.topics.filter(item => item.evidence > 0).length
@@ -119,43 +118,42 @@ export default function StudyReleasePrototype() {
     const mentioned = value.selectedTopics.filter(topic => text.toLowerCase().includes(topic.toLowerCase()))
     return mentioned.length ? mentioned : value.activeTopic ? [value.activeTopic] : []
   }
-  const addTurn = (value: Conversation, text: string, guidanceTopics: string[] = []) => {
+  const addTurn = (value: Conversation, text: string, incomingGuidance: string[] = []) => {
     const isStudy = value.mode === 'Study'
     const topic = isStudy ? value.activeTopic : null
     const question = topic ? value.questions[topic] ?? '' : ''
-    const isAssessment = isStudy && !!question
+    // Demo phrase matcher only. Production must interpret conversational intent, not copy this regex.
+    const asksForQuestion = isStudy && !!topic && /\b(quiz me|test me|ask me (?:a|another) question|give me (?:a|another) question|let'?s practi[cs]e)\b/i.test(text)
+    const questionCount = value.turns.filter(turn => turn.requestedQuestion && turn.topic === topic).length
+    const requestedQuestion = asksForQuestion ? questionCount % 2 ? `What would change in a different example of ${topic?.toLowerCase()}? Explain your reasoning.` : `Can you walk through a simple example of ${topic?.toLowerCase()}?` : ''
+    const guidanceTopics = requestedQuestion ? [] : incomingGuidance
+    const isAssessment = isStudy && !!question && !requestedQuestion && guidanceTopics.length === 0
+    const answerIndex = value.turns.findLastIndex(turn => turn.topic === topic && !!turn.question && turn.question === question && !turn.failed)
+    const helpIndex = value.turns.findLastIndex(turn => !!topic && turn.guidanceTopics.includes(topic))
+    const assistance = requestedQuestion && answerIndex >= 0 && answerIndex > helpIndex ? value.assistedTopics.filter(item => item !== topic) : value.assistedTopics
     const turn: Turn = {
-      id: crypto.randomUUID(), mode: value.mode, topic, question, answer: text,
-      reply: isAssessment ? `Demo feedback for ${topic}: your answer is retained. A real assessment would check its claims against applicable approved references.`
-        : guidanceTopics.length ? guidanceTopics.map(explanationFor).join('\n\n') : `Demo ${value.mode} reply in ${subject.name}. No practice question was answered, so this message is not assessment evidence. No model was called.`,
-      assisted: isAssessment && !!topic && value.assistedTopics.includes(topic), provisional: provisional || !subject.approved || subject.name !== dbms || subject.reference !== sourceText || topic !== 'Normalization',
+      id: crypto.randomUUID(), mode: value.mode, topic, question: isAssessment ? question : '', requestedQuestion, answer: text,
+      reply: requestedQuestion || (isAssessment ? `Demo feedback for ${topic}: your answer is retained. A real assessment would check its claims against applicable approved references.`
+        : guidanceTopics.length ? guidanceTopics.map(explanationFor).join('\n\n') : `Demo ${value.mode} reply in ${subject.name}. This discussion is not assessment evidence. No model was called.`),
+      assisted: isAssessment && !!topic && assistance.includes(topic), provisional: provisional || !subject.approved || subject.name !== dbms || subject.reference !== sourceText || topic !== 'Normalization',
       failed: isAssessment && feedbackFailed, guidanceTopics,
     }
     return {
       ...value, saved: true, title: value.saved ? value.title : isAssessment ? `${topic} practice` : text.slice(0, 42),
       turns: [...value.turns, turn], finished: isStudy ? false : value.finished,
-      // Keep assistance on retries/repeated answers to the same question. Mode switches never clear it.
-      assistedTopics: [...new Set([...value.assistedTopics, ...guidanceTopics])],
+      questions: requestedQuestion && topic ? { ...value.questions, [topic]: requestedQuestion } : value.questions,
+      // Keep assistance on retries/repeated answers. Only a fresh requested attempt can reset it.
+      assistedTopics: [...new Set([...assistance, ...guidanceTopics])],
     }
   }
   const send = () => {
     if (!current || !ready || recording || !current.draft.trim() || (current.mode === 'Study' && !current.activeTopic) || (current.finished && current.mode === 'Study')) return
-    updateCurrent(value => ({ ...addTurn(value, value.draft, value.mode === 'Chat' || !value.activeTopic || !value.questions[value.activeTopic] ? guidanceTopicsFor(value, value.draft) : []), draft: '' }))
+    updateCurrent(value => ({ ...addTurn(value, value.draft, value.mode === 'Chat' || !value.activeTopic || !value.questions[value.activeTopic] || /\b(explain|hint|help|teach)\b/i.test(value.draft) ? guidanceTopicsFor(value, value.draft) : []), draft: '' }))
   }
   const explain = () => {
     if (!current?.activeTopic || !ready || recording) return
     const topic = current.activeTopic
     updateCurrent(value => addTurn({ ...value, mode: 'Chat' }, `Explain ${topic.toLowerCase()}.`, [topic]))
-  }
-  const freshQuestion = () => {
-    if (!current?.activeTopic || !ready || current.draft.trim() || recording) return
-    const topic = current.activeTopic
-    const count = current.turns.filter(turn => turn.topic === topic && turn.question).length + 1
-    updateCurrent(value => {
-      const answerIndex = value.turns.findLastIndex(turn => turn.topic === topic && !!turn.question && turn.question === value.questions[topic] && !turn.failed)
-      const helpIndex = value.turns.findLastIndex(turn => turn.guidanceTopics.includes(topic))
-      return { ...value, finished: false, assistedTopics: answerIndex >= 0 && answerIndex > helpIndex ? value.assistedTopics.filter(item => item !== topic) : value.assistedTopics, questions: { ...value.questions, [topic]: count % 2 ? `Can you walk through a simple example of ${topic.toLowerCase()}?` : `What would change in a different example of ${topic.toLowerCase()}? Explain your reasoning.` } }
-    })
   }
   const toggleRecording = () => {
     if (recording) {
@@ -229,12 +227,12 @@ export default function StudyReleasePrototype() {
                 </>}
               </section>
             </article>)}
-            {current.finished && current.mode === 'Study' ? <section className="prototype-summary"><Check size={18} /><div><h2>Study paused</h2><p>Your messages and draft stay in this subject. No assessment was recorded in the demo.</p><Button variant="outline" onClick={() => updateCurrent(value => ({ ...value, finished: false }))}>Resume</Button></div></section> : current.mode === 'Study' && activeTopic && current.questions[activeTopic.name] ? <section className="prototype-question"><p className="prototype-practice-question">{current.questions[activeTopic.name]}</p>{current.assistedTopics.includes(activeTopic.name) && <p className="prototype-inline-note">Assisted attempt</p>}</section> : null}
+            {current.finished && current.mode === 'Study' ? <section className="prototype-summary"><Check size={18} /><div><h2>Study paused</h2><p>Your messages and draft stay in this subject. No assessment was recorded in the demo.</p><Button variant="outline" onClick={() => updateCurrent(value => ({ ...value, finished: false }))}>Resume</Button></div></section> : null}
             {current.turns.length > 0 && !(current.finished && current.mode === 'Study') && current.activeTopic && <div className="prototype-feedback-actions"><Button variant="outline" onClick={explain} disabled={!ready || recording}>Explain {current.activeTopic.toLowerCase()}</Button>{current.mode === 'Study' && <Button variant="ghost" onClick={() => updateCurrent(value => ({ ...value, finished: true }))} disabled={recording || !!studyTurn?.failed}>Finish studying</Button>}</div>}
           </div>{variant === 'C' && <section className="prototype-source"><h3>Subject reference</h3><p>{subject.reference || 'No approved reference yet.'}</p>{materialButton}</section>}</div>
           <div className="prototype-composer-dock">{!ready && warning}<div className="prototype-composer">
             <label className="sr-only" htmlFor="prototype-composer">Your message</label><Textarea id="prototype-composer" value={current.draft} onChange={event => updateCurrent(value => ({ ...value, draft: event.target.value }))} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() } }} placeholder="Message OutLoud…" />
-            <div className="prototype-composer-toolbar"><span>Gemma 3:4b</span>{current.mode === 'Study' && <Button variant="ghost" onClick={freshQuestion} disabled={!ready || !current.activeTopic || recording || !!current.draft.trim() || !!studyTurn?.failed}>Practice</Button>}<Button variant={recording ? 'destructive' : 'ghost'} onClick={toggleRecording} disabled={!recording && (!ready || (current.finished && current.mode === 'Study'))} aria-label={recording ? 'Stop demo recording' : 'Start demo recording'}>{recording ? <Square size={17} /> : <Mic size={17} />}{recording ? 'Stop' : 'Dictate'}</Button><Button onClick={send} disabled={!ready || recording || !current.draft.trim() || (current.mode === 'Study' && (current.finished || !current.activeTopic))} aria-label="Send message"><ArrowRight size={17} /> Send</Button></div>
+            <div className="prototype-composer-toolbar"><span>Gemma 3:4b</span><Button variant={recording ? 'destructive' : 'ghost'} onClick={toggleRecording} disabled={!recording && (!ready || (current.finished && current.mode === 'Study'))} aria-label={recording ? 'Stop demo recording' : 'Start demo recording'}>{recording ? <Square size={17} /> : <Mic size={17} />}{recording ? 'Stop' : 'Dictate'}</Button><Button onClick={send} disabled={!ready || recording || !current.draft.trim() || (current.mode === 'Study' && (current.finished || !current.activeTopic))} aria-label="Send message"><ArrowRight size={17} /> Send</Button></div>
           </div><div className="prototype-composer-note"><span>{recording ? 'Simulated capture · Stop inserts example dictation' : 'Enter to send · Shift+Enter for a new line'}</span><button onClick={() => setDetails('evidence')}>Assessment evidence</button></div></div>
         </div>}
       </main>
