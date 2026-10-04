@@ -388,12 +388,13 @@ class StudyTests(unittest.TestCase):
         source = self.reference(subject)
         conversation = self.study_conversation(subject)
         async def invented_feedback(request):
-            return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct. Given Books(BookID, AuthorID), BookID is the key. Is this 3NF?', 'question': 'Apply 3NF to your own example.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
+            return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct. Given Books(BookID, AuthorID), BookID is the key. Is this 3NF?', 'question': 'Identify dependencies in this database schema.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
         self.handler = invented_feedback
         with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
             self.send(socket, conversation, 'My independent definition.', 'invented-feedback')
         saved = self.client.get(f'/conversations/{conversation}').json()['messages'][-1]['content']
         self.assertNotIn('BookID', saved)
         self.assertIn('Provisional', saved)
+        self.assertIn('a fresh concrete example of your own', saved)
         topic = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]
         self.assertEqual(topic['judgment'], 'not_assessed')

@@ -41,10 +41,12 @@ def contains_unapproved_identifiers(plan, text, additional_context=''):
     return any(identifier.casefold() not in known for identifier in identifiers)
 
 
+def independent_question(plan):
+    return f"Apply {plan['topic']} to a fresh concrete example of your own. State all assumptions and explain each step using your approved references. Choose an example different from your previous answer."
+
+
 def safe_question(plan, question):
-    if contains_unapproved_identifiers(plan, question):
-        return f"Apply {plan['topic']} to a fresh concrete example of your own. State all assumptions and explain each step using your approved references. Choose an example different from your previous answer."
-    return question
+    return independent_question(plan) if contains_unapproved_identifiers(plan, question) else question
 
 
 def assessment_result(plan, text):
@@ -67,6 +69,8 @@ def assessment_result(plan, text):
     labels = {'demonstrated': 'Demonstrated understanding', 'partial': 'Partial understanding', 'needs_revision': 'Needs revision', 'not_assessed': 'Not assessed'}
     prefix = 'Provisional guidance · verify against your references' if provisional and judged_answer else labels[judgment] if judged_answer else 'Study guidance'
     question = safe_question(plan, reply.question) if plan['action'] != 'finish' else ''
+    if invented_feedback and plan['action'] != 'finish':
+        question = independent_question(plan)
     rendered = f'**{prefix}**\n\n{feedback}'
     if plan['reference_context_incomplete']:
         rendered += '\n\nYour reference context is incomplete. Review concise topic-specific excerpts (up to 2,000 characters per reference and 4,000 total) before established assessment. Omitted material may contain conflicting claims.'
