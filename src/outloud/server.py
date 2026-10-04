@@ -23,6 +23,9 @@ from .runtime import RecordingRuntime, RecordingBusy, RuntimeUnavailable, is_val
 from .capacity import CapacityUnavailable
 from .chat import Chat, ChatBusy, ChatCapacityBusy, ChatRequest, drain
 from .conversations import ConversationStore, DraftConflict
+from .study import StudyStore
+from .study_api import study_router
+from .study_uploads import UploadExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +224,14 @@ class ClientConnection:
                 for event in batch:
                     if not self.active:
                         return
-                    await self.send(event)
+                    try:
+                        await self.send(event)
+                    except sqlite3.Error:
+                        # The inbox still owns this transcript. A failed draft
+                        # write must not close the tab's event connection; a later
+                        # reconnect/replay can commit it and notify this tab.
+                        logger.exception('Could not recover transcript into saved draft')
+                        self.deliver({'type': 'transcription.error', 'message': 'Transcript is saved but the draft could not be updated. Reconnect to retry.'})
 
     async def watch_lease(self):
         while True:
@@ -368,6 +378,9 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         runtime = runtime_factory(publish)
         app.state.runtime = runtime
         app.state.conversations = await asyncio.to_thread(ConversationStore, conversations_path)
+        app.state.study = StudyStore(app.state.conversations)
+        app.state.study_extractor = UploadExtractor(chat.client_factory, chat.reserve_model)
+        chat.study = app.state.study
         chat.store = app.state.conversations
         chat.on_change = conversation_changed
         app.state.chat = chat
@@ -482,6 +495,8 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
             conversation_changed(conversation_id)
         await complete_write(commit())
 
+    app.include_router(study_router(app, complete_write, require_client))
+
     @app.get("/health")
     async def health():
         return {"status": "ok"}
@@ -538,6 +553,9 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
             raise HTTPException(status_code=403, detail="Chat must use the client's conversation")
         if await asyncio.to_thread(app.state.conversations.get, body.conversation_id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
+        study_session = await asyncio.to_thread(app.state.study.session, body.conversation_id)
+        if study_session is not None and len(body.messages[-1].content) > 3000:
+            raise HTTPException(422, 'Study answers must be 3,000 characters or fewer to preserve reference context.')
         # The database read yields; expiry/disconnect during it must not start a
         # model task under a token already revoked by another coroutine.
         require_live_client(session_id)

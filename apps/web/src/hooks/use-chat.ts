@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
+import type { StudyAction } from '@/lib/study'
 import { HTTP_URL } from '@/lib/backend-url'
 import type { ConversationDetail, ConversationLibrary, SavedMessage } from '@/lib/conversations'
 import { readPendingSends, writePendingSends, type PendingSend } from '@/lib/chat-recovery'
@@ -37,10 +38,10 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
       setPending(pendingRef.current)
     }
   }, [])
-  const prepare = (conversationId: string | null, text: string, retry?: PendingSend) => {
-    const previousAttempt = retry ?? pendingRef.current.findLast((item) => (item.conversationId === null || item.conversationId === conversationId) && item.text === text && item.delivery === 'failed')
+  const prepare = (conversationId: string | null, text: string, retry?: PendingSend, studyAction?: StudyAction) => {
+    const previousAttempt = retry ?? pendingRef.current.findLast((item) => (item.conversationId === null || item.conversationId === conversationId) && item.text === text && item.delivery === 'failed' && item.studyAction === studyAction)
     const item: PendingSend = previousAttempt ? { ...previousAttempt, delivery: 'sending' } : {
-      id: crypto.randomUUID(), conversationId, text, createdAt: new Date().toISOString(), delivery: 'sending',
+      id: crypto.randomUUID(), conversationId, text, createdAt: new Date().toISOString(), delivery: 'sending', studyAction,
     }
     changePending((previous) => [...previous.filter((entry) => entry.id !== item.id), item])
     return item
@@ -91,7 +92,7 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
     if (changed) { history.current = next; if (mounted.current) setLive(next) }
   }, [historyRevisions])
 
-  const send = async (id: string, draft: string, onAccepted: () => void, requestId: string) => {
+  const send = async (id: string, draft: string, onAccepted: () => void, requestId: string, studyAction?: StudyAction) => {
     const content = draft.trim()
     if (!sessionId || runs.current.has(id) || !content) { fail(requestId); return }
     const setError = (message: string) => { if (mounted.current) setErrors((previous) => ({ ...previous, [id]: message })) }
@@ -107,7 +108,7 @@ export function useChat(sessionId: string | null, selectedId: string | null, det
     try {
       const response = await fetch(`${HTTP_URL}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
-        body: JSON.stringify({ request_id: active.id, conversation_id: id, messages: [{ role: 'user', content }] }),
+        body: JSON.stringify({ request_id: active.id, conversation_id: id, messages: [{ role: 'user', content }], ...(studyAction ? { study_action: studyAction } : {}) }),
         signal: AbortSignal.any([active.controller.signal, AbortSignal.timeout(190000)]),
       })
       if (!response.ok) {

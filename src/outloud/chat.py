@@ -5,11 +5,13 @@ import time
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from typing import Literal
 
 import anyio
 import httpx2
 from pydantic import BaseModel, Field, model_validator
+from .study_coach import StudyReply, SYSTEM_PROMPT, assessment_result
 
 logger = logging.getLogger(__name__)
 MODEL = "gemma3:4b"
@@ -25,6 +27,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
+    study_action: Literal['answer', 'explain', 'practice', 'finish'] = 'answer'
     messages: list[ChatMessage] = Field(min_length=1, max_length=65)
 
     @model_validator(mode="after")
@@ -125,15 +128,29 @@ class Chat:
             raise ValueError("max_concurrent must be a positive integer")
         self.client_factory = client_factory or ollama_client
         self.store = store
+        self.study = None
         self.on_change = on_change or (lambda conversation_id: None)
         self.max_concurrent = max_concurrent
         self.active = {}
+        self.model_reservations = 0
+
+    @contextmanager
+    def reserve_model(self):
+        self.check_capacity()
+        self.model_reservations += 1
+        try:
+            yield
+        finally:
+            self.model_reservations -= 1
+
+    def check_capacity(self):
+        if len(self.active) + self.model_reservations >= self.max_concurrent:
+            raise ChatCapacityBusy('Gemma is busy. Wait for a reply or extraction to finish, then retry.')
 
     def start(self, session_id, request):
         if request.conversation_id in self.active:
             raise ChatBusy("This conversation is already generating a reply. Stop it or wait, then try again.")
-        if len(self.active) >= self.max_concurrent:
-            raise ChatCapacityBusy("Gemma is busy with other conversations. Wait for a reply to finish, then retry.")
+        self.check_capacity()
         generation = Generation(session_id, request)
         self.active[request.conversation_id] = generation
         generation.task = asyncio.create_task(self.generate(generation))
@@ -184,6 +201,8 @@ class Chat:
         turn_id = str(uuid.uuid4())
         turn_started = False
         reply = ""
+        study_plan, study_result = None, None
+        action = generation.request.study_action
         try:
             if self.store is not None:
                 saved = await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id)
@@ -196,18 +215,31 @@ class Chat:
                 generation.request = ChatRequest(
                     request_id=generation.request.request_id,
                     conversation_id=generation.request.conversation_id,
-                    messages=[*history, generation.request.messages[-1]],
+                    messages=[*history, generation.request.messages[-1]], study_action=action,
                 )
+            payload = {"model": MODEL, "messages": generation.request.context(), "stream": True,
+                       "options": {"num_ctx": CONTEXT_TOKENS, "num_predict": 1024}, "keep_alive": "2m"}
+            if self.study is not None:
+                study_plan = await self.storage(self.study.prepare, generation.request.conversation_id, action)
+            if study_plan is not None:
+                payload['messages'] = [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': json.dumps({key: value for key, value in {**study_plan, 'latest_answer': generation.request.messages[-1].content}.items() if key not in ('conversation_id', 'topic_id', 'previous_evidence')}, ensure_ascii=False)}]
+                payload['format'] = StudyReply.model_json_schema()
+                payload['options']['temperature'] = 0
+                # Save a reviewed study answer before waiting for model feedback.
+                inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id, lambda: self.study.begin_attempt(study_plan))
+                if not inserted:
+                    terminal = await self.replay(generation, await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id))
+                    return
+                turn_started = True
+                self.on_change(generation.request.conversation_id)
+                await generation.queue.put(generation.event('started', model=MODEL, context_tokens=CONTEXT_TOKENS))
             async with asyncio.timeout(180), self.client_factory() as client:
-                async with client.stream("POST", "/api/chat", json={
-                    "model": MODEL, "messages": generation.request.context(), "stream": True,
-                    "options": {"num_ctx": CONTEXT_TOKENS, "num_predict": 1024}, "keep_alive": "2m",
-                }) as response:
+                async with client.stream("POST", "/api/chat", json=payload) as response:
                     if response.status_code == 404:
                         raise ChatFailure("Gemma is not installed. Run: ollama pull gemma3:4b")
                     if response.status_code != 200:
                         raise ChatFailure("Ollama could not start generation. Check its terminal and try again.")
-                    accepted = False
+                    accepted = study_plan is not None
                     characters = 0
                     first_token = None
                     leading = ""
@@ -248,10 +280,16 @@ class Chat:
                                 if first_token is None:
                                     first_token = time.monotonic() - started
                                 reply += text
-                                await generation.queue.put(generation.event("delta", text=text))
+                                if study_plan is None:
+                                    await generation.queue.put(generation.event("delta", text=text))
                         if packet.get("done") is True:
                             if not accepted:
                                 raise ChatFailure("Gemma returned an empty reply. Try again.")
+                            if study_plan is not None:
+                                if packet.get('done_reason') == 'length':
+                                    raise ChatFailure('Study feedback was incomplete. Retry with a shorter answer.')
+                                study_result = assessment_result({**study_plan, 'latest_answer': generation.request.messages[-1].content}, reply)
+                                reply = study_result['rendered']
                             metrics = {"elapsed_seconds": time.monotonic() - started, "first_token_seconds": first_token}
                             for source, target, divisor in (
                                 ("eval_count", "output_tokens", 1), ("prompt_eval_count", "input_tokens", 1),
@@ -285,7 +323,15 @@ class Chat:
             if turn_started:
                 status = {"chat.done": "complete", "chat.cancelled": "cancelled"}.get(terminal["type"], "failed")
                 try:
-                    await self.storage(self.store.finish_turn, generation.request.conversation_id, turn_id, reply, status, terminal.get("metrics"))
+                    callback = (lambda user_id: self.study.complete(study_plan, study_result, user_id)) if study_result is not None else None
+                    if study_plan is not None and study_result is None:
+                        reply = ''  # Never persist malformed JSON as user-visible feedback.
+                    saved_result = await self.storage(self.store.finish_turn, generation.request.conversation_id, turn_id, reply, status, terminal.get("metrics"), callback)
+                    if study_result is not None and status == 'complete':
+                        if saved_result is None:
+                            terminal = generation.event('error', message='Study conversation was removed during feedback.')
+                        else:
+                            await generation.queue.put(generation.event('delta', text=saved_result['rendered']))
                     self.on_change(generation.request.conversation_id)
                 except asyncio.CancelledError:
                     # The drain completed its transaction before propagating this

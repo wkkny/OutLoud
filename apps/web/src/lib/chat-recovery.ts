@@ -1,10 +1,11 @@
 import { z } from 'zod'
+import { studyActionSchema } from './study'
 
 const unscopedDraftKey = 'outloud.unscoped-draft'
 const pendingSendsKey = 'outloud.pending-sends'
 const pendingSendSchema = z.object({
   id: z.string(), conversationId: z.string().nullable(), text: z.string(),
-  createdAt: z.string(), delivery: z.enum(['sending', 'failed']),
+  createdAt: z.string(), delivery: z.enum(['sending', 'failed']), studyAction: studyActionSchema.optional(),
 })
 export type PendingSend = z.infer<typeof pendingSendSchema>
 const recoveryStorage = () => window.outloudDesktop?.managedBackend ? localStorage : sessionStorage

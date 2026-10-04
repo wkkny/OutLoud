@@ -74,6 +74,14 @@ on that port must be stopped first; Electron never attaches to it. Python,
 FFmpeg, and Ollama are still separate prerequisites, not bundled installers.
 See [desktop launch, lifecycle, data, and platform limitations](apps/desktop/README.md).
 
+## Study mode
+
+Open **Study** to create a subject, add or import a syllabus, choose an exam type,
+and review reference material. Explain a topic by typing or dictating, then answer
+follow-up questions and track topic understanding, evidence, and revision priorities
+across conversations. PDF/image extractions require review before use. Unsupported
+assessments stay provisional. See [Study setup, uploads, progress, and recovery](docs/study-mode.md).
+
 ## Connection recovery
 
 Completed transcripts are appended to their originating saved draft before browser
