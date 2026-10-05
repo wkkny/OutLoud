@@ -73,6 +73,8 @@ for the next explicit Send.
 
 The backend saves messages, partial replies, and metrics in a local SQLite
 conversation database. Completed turns supply context after a backend restart.
+After the first successful reply, Gemma names the conversation from its first user
+message. A manual rename takes priority, and a title failure does not fail the reply.
 Unfinished turns are marked failed on restart and their user text stays readable.
 The shared conversation library supports create, select, rename, and delete. Each
 tab retains its selected conversation after reload. Draft changes use version checks

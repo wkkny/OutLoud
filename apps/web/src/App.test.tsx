@@ -7,18 +7,22 @@ import { backendFixture, FakeSocket, initialState, makeSubject } from '@/test/ba
 let backend: ReturnType<typeof backendFixture>
 beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); localStorage.clear(); Reflect.deleteProperty(window, 'outloudDesktop'); backend = backendFixture() })
 afterEach(() => { Reflect.deleteProperty(window, 'outloudDesktop') })
-it('keeps the conversation name in the sidebar and shows the app breadcrumb in the workspace', async () => {
+function openChatAction(action: 'Rename' | 'Delete', chat = 'First chat') {
+  fireEvent.contextMenu(screen.getByRole('button', { name: `Select ${chat}` }))
+  fireEvent.click(screen.getByRole('menuitem', { name: action }))
+}
+it('keeps the conversation name in the sidebar without a workspace breadcrumb', async () => {
   backend.conversations.clear()
   render(<App />)
   act(() => backend.socket().ready())
   await screen.findByText('Your conversations will appear here.')
-  expect(screen.getAllByText('OutLoud')).toHaveLength(2)
-  expect(within(screen.getByRole('main')).getByRole('navigation', { name: 'Workspace breadcrumb' })).toHaveTextContent(/OutLoud\s*\/\s*New conversation/)
+  expect(screen.queryByRole('navigation', { name: 'Workspace breadcrumb' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Select New conversation' })).toBeVisible())
-  expect(within(screen.getByRole('main')).getByRole('navigation', { name: 'Workspace breadcrumb' })).toHaveTextContent(/OutLoud\s*\/\s*New conversation/)
-  expect(screen.getByRole('button', { name: 'Rename conversation' })).toBeEnabled()
-  expect(screen.getByRole('button', { name: 'Delete conversation' })).toBeEnabled()
+  expect(screen.queryByRole('navigation', { name: 'Workspace breadcrumb' })).not.toBeInTheDocument()
+  fireEvent.contextMenu(screen.getByRole('button', { name: 'Select New conversation' }))
+  expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeEnabled()
+  expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeEnabled()
 })
 
 it('keeps sidebar navigation without storage explanations or a pretend workspace footer', async () => {
@@ -143,7 +147,7 @@ it('uses subject-backed topics and a saved sidebar mode switch without a side ca
   act(() => backend.socket().ready())
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
   expect(screen.queryByRole('complementary', { name: 'Materials' })).not.toBeInTheDocument()
-  expect(screen.getByRole('main').querySelector('.workspace-breadcrumb')).toHaveTextContent(/Database Systems.*Normalization/)
+  expect(screen.getByRole('button', { name: 'Select First chat' })).toHaveTextContent('Database Systems')
   expect(screen.getByRole('button', { name: /^Chat$/ })).toHaveAttribute('aria-pressed', 'true')
   fireEvent.click(screen.getByRole('button', { name: /^Study$/ }))
   await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'study')).toBe(true))
@@ -179,7 +183,7 @@ it('lets the learner save a requested tutor reply as the active Study question',
   ]
   render(<App />)
   act(() => backend.socket().ready())
-  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Move First chat to subject' })).toHaveValue(subject.id))
+  expect(await screen.findByRole('button', { name: 'Select First chat' })).toHaveTextContent(subject.name)
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
   await screen.findByText('Explain normalization.')
   fireEvent.click(await screen.findByRole('button', { name: 'Use reply as Study question' }))
@@ -190,17 +194,17 @@ it('lets the learner save a requested tutor reply as the active Study question',
   await waitFor(() => expect(backend.requests.some(request => request.path === '/study/conversations/chat-1/question' && request.method === 'POST' && request.body.question === 'Explain first, second, and third normal forms.')).toBe(true))
 })
 
-it('filters the flat sidebar and moves a conversation without changing its history', async () => {
+it('filters conversations by subject without changing their history', async () => {
   backend.subjects.push(makeSubject(), makeSubject('subject-2', 'Biology'))
+  Object.assign(backend.conversations.get('chat-1')!, { subject_id: 'subject-1' })
   render(<App />)
   act(() => backend.socket().ready())
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
-  fireEvent.change(screen.getByRole('combobox', { name: 'Move First chat to subject' }), { target: { value: 'subject-1' } })
-  await waitFor(() => expect(backend.conversations.get('chat-1')?.subject_id).toBe('subject-1'))
+  expect(screen.queryByRole('combobox', { name: 'Move First chat to subject' })).not.toBeInTheDocument()
   const user = userEvent.setup()
   const filter = screen.getByRole('combobox', { name: 'Filter conversations by subject' })
   await user.click(filter)
-  await user.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+  await user.click(await screen.findByRole('option', { name: 'Biology' }))
   expect(filter).toHaveTextContent('Biology')
   expect(screen.queryByRole('button', { name: 'Select First chat' })).not.toBeInTheDocument()
   expect(backend.conversations.get('chat-1')?.messages).toEqual([])
@@ -526,7 +530,7 @@ it('creates, selects, renames, deletes and restores durable conversations indepe
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(''))
-  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  openChatAction('Rename', 'New conversation')
   fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Ideas' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
   await screen.findByRole('button', { name: 'Select Ideas' })
@@ -538,9 +542,25 @@ it('creates, selects, renames, deletes and restores durable conversations indepe
   await open()
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
   fireEvent.click(screen.getByRole('button', { name: 'Select Ideas' }))
-  fireEvent.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+  openChatAction('Delete', 'Ideas')
   fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Select Ideas' })).not.toBeInTheDocument())
+})
+
+it('opens chat actions on right click without selecting that conversation', async () => {
+  backend.conversations.set('chat-2', { ...backend.conversations.get('chat-1')!, id: 'chat-2', title: 'Second chat', draft: 'Other words', messages: [] })
+  await open()
+  fireEvent.contextMenu(screen.getByRole('button', { name: 'Select Second chat' }))
+  expect(screen.getByRole('button', { name: 'Select First chat', hidden: true })).toHaveAttribute('aria-current', 'page')
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Renamed second chat' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+  await screen.findByRole('button', { name: 'Select Renamed second chat' })
+  expect(screen.getByRole('button', { name: 'Select First chat' })).toHaveAttribute('aria-current', 'page')
+  openChatAction('Delete', 'Renamed second chat')
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Select Renamed second chat' })).not.toBeInTheDocument())
+  expect(screen.getByRole('button', { name: 'Select First chat' })).toHaveAttribute('aria-current', 'page')
 })
 
 it('rebases unsaved edits on atomic remote dictation without appending the transcript twice', async () => {
@@ -1033,16 +1053,16 @@ it('preserves a failed partial reply when a delayed draft clear returns stale st
 
 it('cancels rename and deletion without changing the saved conversation', async () => {
   await open()
-  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  openChatAction('Rename')
   const title = await screen.findByRole('textbox', { name: 'Conversation title' })
   await waitFor(() => expect(title).toHaveFocus())
   fireEvent.change(title, { target: { value: 'Discard this name' } })
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  openChatAction('Rename')
   expect(await screen.findByRole('textbox', { name: 'Conversation title' })).toHaveValue('First chat')
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  openChatAction('Delete')
   expect(await screen.findByRole('alertdialog')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Keep conversation' }))
   await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
@@ -1053,7 +1073,7 @@ it('cancels rename and deletion without changing the saved conversation', async 
 it('keeps a failed deletion open for review and allows retry', async () => {
   await open()
   backend.fetchMock.mockImplementationOnce(async () => Response.json({ detail: 'Conversation storage is busy' }, { status: 503 }))
-  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  openChatAction('Delete')
   fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
   await screen.findByText('Conversation storage is busy')
   expect(screen.getByRole('alertdialog')).toBeInTheDocument()
@@ -1064,17 +1084,17 @@ it('keeps a failed deletion open for review and allows retry', async () => {
 
 it('returns keyboard focus to the rename action after a successful title change', async () => {
   await open()
-  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  openChatAction('Rename')
   fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Reviewed name' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
   await screen.findByRole('button', { name: 'Select Reviewed name' })
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename conversation' })).not.toBeInTheDocument())
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Rename conversation' })).toHaveFocus())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Select Reviewed name' })).toHaveFocus())
 })
 
 it('returns keyboard focus to a surviving header control after deleting the last conversation', async () => {
   await open()
-  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  openChatAction('Delete')
   fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
   await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
   await waitFor(() => expect(screen.getByRole('button', { name: 'Toggle Sidebar' })).toHaveFocus())

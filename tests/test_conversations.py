@@ -38,6 +38,17 @@ class ConversationStoreTests(unittest.TestCase):
         self.assertFalse(self.store.delete(conversation["id"]))
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
 
+    def test_generated_title_uses_first_message_and_never_overwrites_a_manual_name(self):
+        conversation = self.store.create('Biology · Cells', allow_generated_title=True)
+        self.store.append_message(conversation['id'], 'user', 'Explain cell membranes')
+        self.store.append_message(conversation['id'], 'user', 'Explain mitochondria')
+        self.assertEqual(self.store.title_seed(conversation['id']), 'Explain cell membranes')
+        self.assertTrue(self.store.set_generated_title(conversation['id'], 'Cell Membrane Basics'))
+        self.assertFalse(self.store.set_generated_title(conversation['id'], 'Mitochondria Overview'))
+        self.store.update(conversation['id'], title='New chat')
+        self.assertIsNone(self.store.title_seed(conversation['id']))
+        self.assertFalse(self.store.set_generated_title(conversation['id'], 'Another Model Title'))
+
     def test_restart_marks_inflight_turn_failed_and_excludes_it_from_context(self):
         conversation = self.store.create()
         self.store.start_turn(conversation["id"], "interrupted", "Keep my text")

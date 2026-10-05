@@ -257,7 +257,7 @@ class StudyStore:
             topic = next((item for item in subject['topics'] if item['id'] == topic_id and item['active']), None)
             if topic is None:
                 raise LookupError('Active topic not found')
-            conversation = self.conversations.create(f"{subject['name']} · {topic['name']}", subject_id=subject_id, mode='study', topic_ids=[topic_id], focus_topic_id=topic_id)
+            conversation = self.conversations.create(f"{subject['name']} · {topic['name']}", subject_id=subject_id, mode='study', topic_ids=[topic_id], focus_topic_id=topic_id, allow_generated_title=True)
             self.db.execute('INSERT INTO study_sessions(conversation_id,topic_id,question) VALUES(?,?,?)', (conversation['id'], topic_id, ''))
             return self.session(conversation['id'])
 

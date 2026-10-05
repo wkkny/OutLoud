@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { AudioLines, MessageSquare, Plus, Search, SquarePen } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { ConversationActions } from '@/components/conversation-actions'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -40,15 +41,13 @@ export function AppSidebar({ library, list, selectedId, subjects, connected, loa
               <SelectContent align="start"><SelectGroup>{subjectOptions.map(subject => <SelectItem key={subject.value} value={subject.value}>{subject.label}</SelectItem>)}</SelectGroup></SelectContent>
             </Select>
           </div>
-          <nav aria-label="Conversations"><SidebarMenu>
+          <nav aria-label="Conversations"><SidebarMenu className="gap-1">
             {loading ? [0, 1, 2].map(item => <SidebarMenuItem key={item}><SidebarMenuSkeleton /></SidebarMenuItem>) : visible.map(item => <SidebarMenuItem key={item.id}>
-              <SidebarMenuButton className="h-auto min-h-9 py-2" isActive={selectedId === item.id} aria-label={`Select ${item.title}`} aria-current={selectedId === item.id ? 'page' : undefined} onClick={() => selectConversation(item)} title={item.title}>
-                <MessageSquare /><span className="sidebar-conversation-name">{filter === 'all' && <small>{subjects.find(subject => subject.id === item.subject_id)?.name ?? 'Unassigned'}</small>}{item.title}</span>
-              </SidebarMenuButton>
-              <label className="sr-only" htmlFor={`move-${item.id}`}>Move {item.title} to subject</label>
-              <select id={`move-${item.id}`} className="sidebar-move-select" aria-label={`Move ${item.title} to subject`} value={item.subject_id ?? ''} onClick={event => event.stopPropagation()} onChange={event => { void library.updateWorkspace(item.id, { subject_id: event.target.value || null }) }}>
-                <option value="">Unassigned</option>{subjects.map(subject => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
-              </select>
+              <ConversationActions conversation={item} library={library} enabled={connected}>
+                <SidebarMenuButton className="h-auto min-h-9 py-2" isActive={selectedId === item.id} aria-label={`Select ${item.title}`} aria-current={selectedId === item.id ? 'page' : undefined} onClick={() => selectConversation(item)} title={item.title}>
+                  <MessageSquare /><span className="sidebar-conversation-name">{filter === 'all' && <small>{subjects.find(subject => subject.id === item.subject_id)?.name ?? 'Unassigned'}</small>}{item.title}</span>
+                </SidebarMenuButton>
+              </ConversationActions>
             </SidebarMenuItem>)}
           </SidebarMenu></nav>
         </SidebarGroupContent>

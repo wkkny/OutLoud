@@ -14,6 +14,11 @@ async function open() {
   return view
 }
 
+function openChatAction(action: 'Rename' | 'Delete') {
+  fireEvent.contextMenu(screen.getByRole('button', { name: 'Select First chat' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: action }))
+}
+
 it('keeps connection retries and recovery quiet in the notification area', async () => {
   await open()
   vi.useFakeTimers()
@@ -212,7 +217,7 @@ it('preserves dismissal of an unresolved chat error when switching away and back
 
 it('confirms deletion after the confirmation dialog closes and restores focus to a surviving control', async () => {
   await open()
-  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }))
+  openChatAction('Delete')
   fireEvent.click(await screen.findByRole('button', { name: 'Confirm delete' }))
   const notice = await within(screen.getByRole('region', { name: 'Notifications' })).findByRole('dialog', { name: 'Conversation deleted' })
   expect(within(notice).getByText('First chat')).toBeInTheDocument()
@@ -230,7 +235,7 @@ it('confirms a successful rename even when the following library refresh fails',
     if (init?.method === 'PATCH') renamed = true
     return response
   })
-  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  openChatAction('Rename')
   fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Saved name' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
   const notifications = screen.getByRole('region', { name: 'Notifications' })
@@ -264,13 +269,13 @@ it('explains how to fix microphone access without showing recording diagnostics'
 
 it('confirms a successful rename in a dismissible notification without taking focus', async () => {
   await open()
-  fireEvent.click(screen.getByRole('button', { name: 'Rename conversation' }))
+  openChatAction('Rename')
   fireEvent.change(await screen.findByRole('textbox', { name: 'Conversation title' }), { target: { value: 'Reviewed name' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
   const notifications = await screen.findByRole('region', { name: 'Notifications' })
   const notice = await within(notifications).findByRole('dialog', { name: 'Conversation renamed' })
   expect(within(notice).getByText('Reviewed name')).toBeInTheDocument()
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Rename conversation' })).toHaveFocus())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Select Reviewed name' })).toHaveFocus())
   fireEvent.mouseEnter(notifications)
   fireEvent.click(within(notice).getByRole('button', { name: 'Close toast' }))
   await waitFor(() => expect(within(notifications).queryByRole('dialog', { name: 'Conversation renamed' })).not.toBeInTheDocument())
