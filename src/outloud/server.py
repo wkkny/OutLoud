@@ -51,12 +51,20 @@ class ChatCancelRequest(BaseModel):
 
 class ConversationCreate(BaseModel):
     title: str = Field(default="New chat", min_length=1, max_length=200)
+    subject_id: str | None = None
+    mode: Literal["study", "chat"] = "chat"
+    topic_ids: list[str] = Field(default_factory=list, max_length=200)
+    focus_topic_id: str | None = None
 
 
 class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     draft: str | None = Field(default=None, max_length=65536)
     draft_version: int | None = Field(default=None, strict=True, ge=0)
+    subject_id: str | None = None
+    mode: Literal["study", "chat"] | None = None
+    topic_ids: list[str] | None = Field(default=None, max_length=200)
+    focus_topic_id: str | None = None
 
 
 class Heartbeat(BaseModel):
@@ -463,7 +471,13 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
     @app.post("/conversations", status_code=201)
     async def create_conversation(body: ConversationCreate):
         async def commit():
-            conversation = await asyncio.to_thread(app.state.conversations.create, body.title)
+            try:
+                await asyncio.to_thread(app.state.study.validate_workspace, body.subject_id, body.topic_ids, body.focus_topic_id)
+            except LookupError as error:
+                raise HTTPException(status_code=404, detail="Subject not found") from error
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+            conversation = await asyncio.to_thread(app.state.conversations.create, body.title, body.subject_id, body.mode, body.topic_ids, body.focus_topic_id)
             conversation_changed(conversation["id"])
             return conversation
         return await complete_write(commit())
@@ -478,9 +492,42 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
     @app.patch("/conversations/{conversation_id}")
     async def update_conversation(conversation_id: str, body: ConversationUpdate):
         async def commit():
-            conversation = await asyncio.to_thread(app.state.conversations.update, conversation_id, title=body.title, draft=body.draft, draft_version=body.draft_version)
+            before = await asyncio.to_thread(app.state.conversations.get, conversation_id)
+            if before is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            subject_id = body.subject_id if "subject_id" in body.model_fields_set else before["subject_id"]
+            subject_changed = "subject_id" in body.model_fields_set and body.subject_id != before["subject_id"]
+            topic_ids = body.topic_ids if body.topic_ids is not None else ([] if subject_changed else before["topic_ids"])
+            focus_topic_id = body.focus_topic_id if "focus_topic_id" in body.model_fields_set else (None if subject_changed else before["focus_topic_id"])
+            focus_changed = focus_topic_id != before["focus_topic_id"]
+            if any(key in body.model_fields_set for key in ("subject_id", "topic_ids", "focus_topic_id")):
+                try:
+                    await asyncio.to_thread(app.state.study.validate_workspace, subject_id, topic_ids, focus_topic_id)
+                except LookupError as error:
+                    raise HTTPException(status_code=404, detail="Subject not found") from error
+                except ValueError as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
+            updates = {"title": body.title, "draft": body.draft, "draft_version": body.draft_version}
+            if "subject_id" in body.model_fields_set:
+                updates["subject_id"] = body.subject_id
+                if subject_changed and body.topic_ids is None:
+                    updates["topic_ids"] = []
+                    updates["focus_topic_id"] = None
+            if "mode" in body.model_fields_set:
+                updates["mode"] = body.mode
+            if body.topic_ids is not None:
+                updates["topic_ids"] = body.topic_ids
+            if "focus_topic_id" in body.model_fields_set:
+                updates["focus_topic_id"] = body.focus_topic_id
+            conversation = await asyncio.to_thread(app.state.conversations.update, conversation_id, **updates)
             if conversation is None:
                 raise HTTPException(status_code=404, detail="Conversation not found")
+            if subject_changed:
+                await asyncio.to_thread(app.state.study.reset_session_after_move, conversation_id, conversation['subject_id'], conversation['mode'], conversation['focus_topic_id'])
+            elif focus_changed and conversation['mode'] == 'study' and conversation['subject_id'] is not None and conversation['focus_topic_id'] is not None:
+                await asyncio.to_thread(app.state.study.ensure_session, conversation_id, conversation['subject_id'], conversation['focus_topic_id'])
+            elif focus_changed and conversation['mode'] == 'study' and conversation['subject_id'] is not None:
+                await asyncio.to_thread(app.state.study.clear_session, conversation_id)
             conversation_changed(conversation_id)
             return conversation
         return await complete_write(commit())
@@ -551,8 +598,19 @@ def create_app(runtime_factory=None, *, owner_lease_seconds=90, clock=time.monot
         connection = require_live_client(session_id)
         if connection.conversation_id is not None and connection.conversation_id != body.conversation_id:
             raise HTTPException(status_code=403, detail="Chat must use the client's conversation")
-        if await asyncio.to_thread(app.state.conversations.get, body.conversation_id) is None:
+        conversation = await asyncio.to_thread(app.state.conversations.get, body.conversation_id)
+        if conversation is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
+        mode = body.mode or conversation["mode"]
+        topic_ids = body.topic_ids if body.topic_ids is not None else conversation["topic_ids"]
+        focus_topic_id = body.focus_topic_id if "focus_topic_id" in body.model_fields_set else conversation["focus_topic_id"]
+        try:
+            await asyncio.to_thread(app.state.study.validate_workspace, conversation["subject_id"], topic_ids, focus_topic_id)
+        except (LookupError, ValueError) as error:
+            raise HTTPException(422, detail=str(error)) from error
+        body = body.model_copy(update={"mode": mode, "topic_ids": topic_ids, "focus_topic_id": focus_topic_id})
+        if mode == "study" and conversation["subject_id"] is not None and focus_topic_id is not None:
+            await asyncio.to_thread(app.state.study.ensure_session, body.conversation_id, conversation["subject_id"], focus_topic_id)
         study_session = await asyncio.to_thread(app.state.study.session, body.conversation_id)
         if study_session is not None and len(body.messages[-1].content) > 3000:
             raise HTTPException(422, 'Study answers must be 3,000 characters or fewer to preserve reference context.')

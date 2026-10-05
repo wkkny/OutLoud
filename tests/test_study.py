@@ -65,16 +65,347 @@ class StudyTests(unittest.TestCase):
         renamed = self.client.patch(f"/study/subjects/{subject['id']}", json=body).json()
         self.assertEqual(renamed['topics'][0]['revision'], 2)
 
-    def test_study_conversation_starts_with_topic_and_shares_subject_progress(self):
+    def test_study_conversation_starts_without_prompt_and_is_linked_to_subject(self):
         subject = self.create_subject()
         topic = subject['topics'][0]
         response = self.client.post(f"/study/subjects/{subject['id']}/topics/{topic['id']}/conversations")
         self.assertEqual(response.status_code, 201, response.text)
         session = self.client.get(f"/study/conversations/{response.json()['conversation_id']}").json()
         self.assertEqual(session['topic']['name'], 'Normalization')
-        self.assertIn('Explain', session['question'])
+        self.assertEqual(session['question'], '')
         self.assertEqual(session['subject']['exam_type'], 'written')
-        self.assertEqual(self.client.get(f"/conversations/{session['conversation_id']}").json()['draft'], '')
+        conversation = self.client.get(f"/conversations/{session['conversation_id']}").json()
+        self.assertEqual(conversation['draft'], '')
+        self.assertEqual(conversation['subject_id'], subject['id'])
+
+    def test_selected_topic_focus_and_mode_are_saved_with_the_accepted_turn(self):
+        subject = self.create_subject()
+        conversation = self.study_conversation(subject)
+        topics = [topic['id'] for topic in subject['topics']]
+        updated = self.client.patch(f"/conversations/{conversation}", json={'topic_ids': topics, 'focus_topic_id': topics[1], 'mode': 'study'})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET topic_id=?,question=? WHERE conversation_id=?', (topics[1], 'Compare these topics.', conversation))
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            response = self.client.post('/chat', headers=headers, json={'conversation_id': conversation, 'request_id': 'focus-turn', 'mode': 'study', 'topic_ids': topics, 'focus_topic_id': topics[1], 'messages': [{'role': 'user', 'content': 'Compare the two topics.'}]})
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        saved = self.client.get(f'/conversations/{conversation}').json()
+        self.assertEqual(saved['messages'][0]['turn_context']['mode'], 'study')
+        self.assertEqual(saved['messages'][0]['turn_context']['topic_ids'], topics)
+        self.assertEqual(saved['messages'][0]['turn_context']['focus_topic_id'], topics[1])
+        refreshed = self.client.get(f"/study/subjects/{subject['id']}").json()
+        self.assertEqual(len(refreshed['topics'][1]['history']), 1)
+
+    def test_chat_mode_turn_is_saved_but_never_assessed(self):
+        subject = self.create_subject()
+        conversation = self.study_conversation(subject)
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            response = self.client.post('/chat', headers=headers, json={'conversation_id': conversation, 'request_id': 'chat-mode-turn', 'mode': 'chat', 'topic_ids': [subject['topics'][0]['id']], 'focus_topic_id': subject['topics'][0]['id'], 'messages': [{'role': 'user', 'content': 'What is normalization?'}]})
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        refreshed = self.client.get(f"/study/subjects/{subject['id']}").json()
+        self.assertEqual(refreshed['topics'][0]['history'], [])
+        saved = self.client.get(f'/conversations/{conversation}').json()
+        self.assertEqual(saved['messages'][0]['turn_context']['mode'], 'chat')
+
+    def test_first_study_turn_without_a_requested_question_is_not_assessed(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post(f"/study/subjects/{subject['id']}/topics/{topic['id']}/conversations").json()['conversation_id']
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            response = self.client.post('/chat', headers=headers, json={'conversation_id': conversation, 'request_id': 'first-study-turn', 'mode': 'study', 'topic_ids': [topic['id']], 'focus_topic_id': topic['id'], 'messages': [{'role': 'user', 'content': 'Can you explain normalization?'}]})
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        self.assertNotIn('format', self.requests[0])
+        self.assertEqual(self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['history'], [])
+
+    def test_learner_can_promote_a_requested_reply_to_the_active_study_question(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post(f"/study/subjects/{subject['id']}/topics/{topic['id']}/conversations").json()['conversation_id']
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation, 'Give me a question about normalization.', 'ask-question')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        messages = self.client.get(f'/conversations/{conversation}').json()['messages']
+        assistant = messages[-1]
+        saved = self.client.post(f'/study/conversations/{conversation}/question', json={
+            'assistant_message_id': assistant['id'], 'topic_id': topic['id'],
+            'question': 'Explain how to remove transitive dependencies.',
+        })
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()['question'], 'Explain how to remove transitive dependencies.')
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation, 'Separate the transitive dependency.', 'answer-question')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        self.assertIn('format', self.requests[-1])
+        history = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['history']
+        self.assertEqual(history[0]['question'], 'Explain how to remove transitive dependencies.')
+
+    def test_completed_topic_scoped_chat_is_guidance_and_survives_subject_deletion(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post('/conversations', json={
+            'title': 'Discussion', 'subject_id': subject['id'], 'mode': 'chat',
+            'topic_ids': [topic['id']], 'focus_topic_id': topic['id'],
+        }).json()
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation['id'], 'Explain normalization.', 'scoped-chat')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        saved = self.client.get(f"/conversations/{conversation['id']}").json()
+        assistant = saved['messages'][-1]
+        guidance = self.client.app.state.conversations.db.execute('SELECT assistant_message_id,topic_id FROM study_guidance').fetchall()
+        self.assertEqual([(row['assistant_message_id'], row['topic_id']) for row in guidance], [(assistant['id'], topic['id'])])
+        self.assertIsNone(self.client.app.state.study.session(conversation['id']))
+        removed = self.client.delete(f"/study/conversations/{conversation['id']}/guidance/{assistant['id']}?topic_id={topic['id']}")
+        self.assertEqual(removed.json(), True)
+        restored = self.client.post(f"/study/conversations/{conversation['id']}/guidance", json={'assistant_message_id': assistant['id'], 'topic_id': topic['id']})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.client.delete(f"/study/subjects/{subject['id']}")
+        retained = self.client.get(f"/conversations/{conversation['id']}")
+        self.assertEqual(retained.status_code, 200, retained.text)
+        self.assertIsNone(retained.json()['subject_id'])
+
+    def test_moving_study_conversation_resets_session_to_the_new_subject(self):
+        first = self.create_subject()
+        second = self.client.post('/study/subjects', json={'name': 'Networks', 'topics': [{'name': 'Routing'}]}).json()
+        source_topic = first['topics'][0]
+        target_topic = second['topics'][0]
+        conversation_id = self.client.post(f"/study/subjects/{first['id']}/topics/{source_topic['id']}/conversations").json()['conversation_id']
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET question=? WHERE conversation_id=?', ('Old subject question', conversation_id))
+        moved = self.client.patch(f'/conversations/{conversation_id}', json={
+            'subject_id': second['id'], 'topic_ids': [target_topic['id']], 'focus_topic_id': target_topic['id'],
+        })
+        self.assertEqual(moved.status_code, 200, moved.text)
+        session = self.client.app.state.study.session(conversation_id)
+        self.assertEqual(session['subject']['id'], second['id'])
+        self.assertEqual(session['topic']['id'], target_topic['id'])
+        self.assertEqual(session['question'], '')
+
+    def test_switching_study_focus_clears_the_old_topic_question(self):
+        subject = self.create_subject()
+        first, second = subject['topics']
+        conversation_id = self.client.post(f"/study/subjects/{subject['id']}/topics/{first['id']}/conversations").json()['conversation_id']
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET question=? WHERE conversation_id=?', ('Question for normalization', conversation_id))
+        switched = self.client.patch(f'/conversations/{conversation_id}', json={
+            'topic_ids': [first['id'], second['id']], 'focus_topic_id': second['id'],
+        })
+        self.assertEqual(switched.status_code, 200, switched.text)
+        session = self.client.get(f'/study/conversations/{conversation_id}').json()
+        self.assertEqual(session['topic']['id'], second['id'])
+        self.assertEqual(session['question'], '')
+
+    def test_clearing_all_topics_keeps_study_discussion_out_of_assessment(self):
+        subject = self.create_subject()
+        conversation_id = self.study_conversation(subject)
+        updated = self.client.patch(f'/conversations/{conversation_id}', json={'topic_ids': [], 'focus_topic_id': None})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertIsNone(self.client.get(f'/study/conversations/{conversation_id}').json())
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.client.post('/chat', headers={**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}, json={
+                'conversation_id': conversation_id, 'request_id': 'no-focused-topic', 'mode': 'study',
+                'topic_ids': [], 'focus_topic_id': None, 'messages': [{'role': 'user', 'content': 'Let us discuss the course generally.'}],
+            })
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        self.assertNotIn('format', self.requests[-1])
+        self.assertEqual(self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['history'], [])
+
+    def test_approved_reference_and_topic_progress_reach_subject_chat_context(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post('/conversations', json={
+            'title': 'Study chat', 'subject_id': subject['id'], 'mode': 'chat',
+            'topic_ids': [topic['id']], 'focus_topic_id': topic['id'],
+        }).json()
+        upload = self.client.app.state.study.add_upload(subject['id'], 'notes.pdf', 'reference', b'pdf-bytes', 'Reviewed definition of 3NF.', [1])
+        self.client.app.state.study.approve_upload(upload['id'], 'Reviewed definition of 3NF.', [topic['id']], [])
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation['id'], 'Explain the topic.', 'context-chat')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        context = self.requests[0]['messages'][0]['content']
+        self.assertIn('Course: DBMS', context)
+        self.assertIn('Topic: Normalization', context)
+        self.assertIn('Reviewed definition of 3NF.', context)
+
+    def test_retry_uses_the_accepted_study_topic_question_and_assistance(self):
+        subject = self.create_subject()
+        first_topic, second_topic = subject['topics']
+        conversation_id = self.study_conversation(subject)
+        self.client.patch(f'/conversations/{conversation_id}', json={'mode': 'chat'})
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation_id, 'Explain normalization for this topic.', 'retry-guidance')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        self.client.patch(f'/conversations/{conversation_id}', json={'mode': 'study'})
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET question=? WHERE conversation_id=?', ('Explain normalization.', conversation_id))
+
+        async def fail(request):
+            return httpx2.Response(500)
+        self.handler = fail
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation_id, 'My answer.', 'failed-answer')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.error', response.text)
+        failed_user = self.client.get(f'/conversations/{conversation_id}').json()['messages'][-2]
+        self.assertTrue(failed_user['turn_context']['assisted'])
+
+        self.handler = self.reply
+        self.client.patch(f'/conversations/{conversation_id}', json={
+            'mode': 'chat', 'topic_ids': [first_topic['id'], second_topic['id']], 'focus_topic_id': second_topic['id'],
+        })
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            response = self.client.post('/chat', headers=headers, json={
+                'conversation_id': conversation_id, 'request_id': 'retry-original-turn',
+                'retry_of_message_id': failed_user['id'], 'mode': 'chat',
+                'topic_ids': [first_topic['id'], second_topic['id']], 'focus_topic_id': second_topic['id'],
+                'messages': [{'role': 'user', 'content': 'My answer.'}],
+            })
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        topic = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]
+        self.assertEqual(topic['history'][-1]['question'], 'Explain normalization.')
+        self.assertEqual(topic['history'][-1]['hinted'], 1)
+        self.assertEqual(self.client.get(f'/study/subjects/{subject["id"]}').json()['topics'][1]['history'], [])
+
+    def test_retry_keeps_an_independent_turn_independent_after_later_chat_guidance(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation_id = self.study_conversation(subject)
+        async def fail(request):
+            return httpx2.Response(500)
+        self.handler = fail
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation_id, 'My independent answer.', 'failed-independent-answer')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.error', response.text)
+        failed_user = self.client.get(f'/conversations/{conversation_id}').json()['messages'][-2]
+        self.assertFalse(failed_user['turn_context']['assisted'])
+        self.assertIn('study_plan', failed_user['turn_context'])
+        upload = self.client.app.state.study.add_upload(subject['id'], 'later.pdf', 'reference', b'pdf-bytes', 'Added after the failed attempt.', [1])
+        self.client.app.state.study.approve_upload(upload['id'], 'Added after the failed attempt.', [topic['id']], [])
+
+        self.handler = self.reply
+        self.client.patch(f'/conversations/{conversation_id}', json={'mode': 'chat'})
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            self.send(socket, conversation_id, 'Here is a hint about the topic.', 'later-chat-guidance')
+        self.client.patch(f'/conversations/{conversation_id}', json={'mode': 'study'})
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            response = self.client.post('/chat', headers=headers, json={
+                'conversation_id': conversation_id, 'request_id': 'retry-independent-turn',
+                'retry_of_message_id': failed_user['id'], 'mode': 'chat',
+                'topic_ids': [topic['id']], 'focus_topic_id': topic['id'],
+                'messages': [{'role': 'user', 'content': 'My independent answer.'}],
+            })
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        history = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['history']
+        self.assertEqual(history[-1]['hinted'], 0)
+        study_payload = json.loads(self.requests[-1]['messages'][1]['content'])
+        self.assertEqual(study_payload['question'], 'Explain the topic in your own words.')
+        self.assertEqual(study_payload['references'], [])
+
+    def test_nonempty_interrupted_chat_hint_is_saved_as_delivered_guidance(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post('/conversations', json={
+            'title': 'Discussion', 'subject_id': subject['id'], 'mode': 'chat',
+            'topic_ids': [topic['id']], 'focus_topic_id': topic['id'],
+        }).json()
+        async def interrupted(request):
+            self.requests.append(json.loads(request.content))
+            return httpx2.Response(200, content=json.dumps({'message': {'content': 'Hint: look for transitive dependencies.'}, 'done': False}) + '\n')
+        self.handler = interrupted
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation['id'], 'Can I have a hint?', 'interrupted-hint')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.error', response.text)
+        saved = self.client.get(f"/conversations/{conversation['id']}").json()
+        self.assertEqual(saved['messages'][-1]['status'], 'failed')
+        guidance = self.client.app.state.conversations.db.execute('SELECT assistant_message_id,topic_id FROM study_guidance').fetchone()
+        self.assertEqual((guidance['assistant_message_id'], guidance['topic_id']), (saved['messages'][-1]['id'], topic['id']))
+
+    def test_chat_retry_reuses_the_accepted_course_context_snapshot(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post('/conversations', json={
+            'title': 'Discussion', 'subject_id': subject['id'], 'mode': 'chat',
+            'topic_ids': [topic['id']], 'focus_topic_id': topic['id'],
+        }).json()
+        upload = self.client.app.state.study.add_upload(subject['id'], 'notes.pdf', 'reference', b'pdf-bytes', 'Initial approved reference.', [1])
+        self.client.app.state.study.approve_upload(upload['id'], 'Initial approved reference.', [topic['id']], [])
+        async def interrupted(request):
+            self.requests.append(json.loads(request.content))
+            return httpx2.Response(200, content=json.dumps({'message': {'content': 'Partial explanation.'}, 'done': False}) + '\n')
+        self.handler = interrupted
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            response = self.send(socket, conversation['id'], 'Explain these notes.', 'failed-context-chat')
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.error', response.text)
+        failed_user = self.client.get(f"/conversations/{conversation['id']}").json()['messages'][-2]
+        self.client.app.state.study.approve_upload(upload['id'], 'Updated reference after the request.', [topic['id']], [])
+
+        self.handler = self.reply
+        with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+            headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
+            response = self.client.post('/chat', headers=headers, json={
+                'conversation_id': conversation['id'], 'request_id': 'retry-saved-chat-context',
+                'retry_of_message_id': failed_user['id'], 'mode': 'chat',
+                'topic_ids': [topic['id']], 'focus_topic_id': topic['id'],
+                'messages': [{'role': 'user', 'content': 'Explain these notes.'}],
+            })
+        self.assertEqual(json.loads(response.text.splitlines()[-1])['type'], 'chat.done', response.text)
+        saved_context = self.requests[-1]['messages'][0]['content']
+        self.assertIn('Initial approved reference.', saved_context)
+        self.assertNotIn('Updated reference after the request.', saved_context)
+
+    def test_marked_chat_guidance_assists_one_study_attempt_then_can_be_independent(self):
+        subject = self.create_subject()
+        topic = subject['topics'][0]
+        conversation = self.client.post('/conversations', json={'subject_id': subject['id'], 'mode': 'chat', 'topic_ids': [topic['id']], 'focus_topic_id': topic['id']}).json()
+        self.client.app.state.conversations.append_message(conversation['id'], 'user', 'Can you explain this?')
+        assistant = self.client.app.state.conversations.append_message(conversation['id'], 'assistant', 'A relevant explanation.', status='complete')
+        marked = self.client.post(f"/study/conversations/{conversation['id']}/guidance", json={'assistant_message_id': assistant['id'], 'topic_id': topic['id']})
+        self.assertEqual(marked.status_code, 200, marked.text)
+        self.assertIsNone(self.client.app.state.study.session(conversation['id']))
+        self.client.app.state.study.ensure_session(conversation['id'], subject['id'], topic['id'])
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET question=? WHERE conversation_id=?', ('Explain normalization.', conversation['id']))
+        self.client.patch(f"/conversations/{conversation['id']}", json={'mode': 'study'})
+        for request_id in ('assisted-attempt', 'independent-attempt'):
+            with self.client.websocket_connect('/events', headers=ORIGIN) as socket:
+                self.send(socket, conversation['id'], 'My response.', request_id)
+        history = self.client.get(f"/study/subjects/{subject['id']}").json()['topics'][0]['history']
+        self.assertEqual([item['hinted'] for item in history], [1, 0])
+
+    def test_chat_can_be_created_moved_and_detached_from_a_subject(self):
+        subject = self.create_subject()
+        created = self.client.post('/conversations', json={'title': 'Exam notes', 'subject_id': subject['id']})
+        self.assertEqual(created.status_code, 201, created.text)
+        conversation = created.json()
+        self.assertEqual(conversation['subject_id'], subject['id'])
+        self.client.patch(f"/conversations/{conversation['id']}", json={'draft': 'unfinished thought', 'draft_version': 0})
+        self.client.app.state.conversations.append_message(conversation['id'], 'user', 'Keep this history')
+        moved = self.client.patch(f"/conversations/{conversation['id']}", json={'subject_id': None})
+        self.assertEqual(moved.status_code, 200, moved.text)
+        saved = self.client.get(f"/conversations/{conversation['id']}").json()
+        self.assertIsNone(saved['subject_id'])
+        self.assertEqual(saved['draft'], 'unfinished thought')
+        self.assertEqual([message['content'] for message in saved['messages']], ['Keep this history'])
+
+    def test_chat_rejects_unknown_subject(self):
+        response = self.client.post('/conversations', json={'title': 'Invalid', 'subject_id': 'missing'})
+        self.assertEqual(response.status_code, 404)
+
+    def test_deleting_subject_detaches_regular_chats_but_removes_study_conversations(self):
+        subject = self.create_subject()
+        regular = self.client.post('/conversations', json={'title': 'Discussion', 'subject_id': subject['id']}).json()
+        self.client.patch(f"/conversations/{regular['id']}", json={'draft': 'keep this', 'draft_version': 0})
+        self.client.app.state.conversations.append_message(regular['id'], 'user', 'Preserve this history')
+        study = self.study_conversation(subject)
+        self.client.delete(f"/study/subjects/{subject['id']}")
+        retained = self.client.get(f"/conversations/{regular['id']}").json()
+        self.assertIsNone(retained['subject_id'])
+        self.assertEqual(retained['draft'], 'keep this')
+        self.assertEqual([message['content'] for message in retained['messages']], ['Preserve this history'])
+        self.assertEqual(self.client.get(f'/conversations/{study}').status_code, 404)
 
     def test_image_upload_is_reviewed_before_becoming_reference_material(self):
         import io
@@ -101,7 +432,11 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(saved['text'], 'Reviewed definition of 3NF')
 
     def study_conversation(self, subject):
-        return self.client.post(f"/study/subjects/{subject['id']}/topics/{subject['topics'][0]['id']}/conversations").json()['conversation_id']
+        conversation_id = self.client.post(f"/study/subjects/{subject['id']}/topics/{subject['topics'][0]['id']}/conversations").json()['conversation_id']
+        # Assessment-path tests explicitly seed a learner-requested question.
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET question=? WHERE conversation_id=?', ('Explain the topic in your own words.', conversation_id))
+        return conversation_id
 
     def send(self, socket, conversation, text, request_id, action='answer'):
         headers = {**ORIGIN, 'X-Session-ID': receive_type(socket, 'session.ready')['session_id']}
@@ -215,7 +550,7 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
         self.client.__exit__(None, None, None)
         self.client = self.open_client()
-        self.assertIn('Explain Normalization in your own words', self.client.get(f'/study/conversations/{conversation}').json()['question'])
+        self.assertEqual(self.client.get(f'/study/conversations/{conversation}').json()['question'], 'Explain the topic in your own words.')
         self.assertEqual(len(self.requests), 1)
 
     def test_deleting_subject_removes_its_study_conversations_and_uploads(self):
@@ -254,6 +589,8 @@ class StudyTests(unittest.TestCase):
         source = self.client.post(f"/study/subjects/{subject['id']}/references", json={'name': 'Exam notes', 'text': 'DBMS reference for all topics.'}).json()['id']
         topic = subject['topics'][1]
         conversation = self.client.post(f"/study/subjects/{subject['id']}/topics/{topic['id']}/conversations").json()['conversation_id']
+        with self.client.app.state.conversations.db:
+            self.client.app.state.conversations.db.execute('UPDATE study_sessions SET question=? WHERE conversation_id=?', ('Apply the topic.', conversation))
         async def supported(request):
             return httpx2.Response(200, content=json.dumps({'message': {'content': json.dumps({'feedback': 'Correct.', 'question': 'Apply it.', 'judgment': 'demonstrated', 'confident': True, 'sources': [source], 'gaps': []})}, 'done': True}) + '\n')
         self.handler = supported

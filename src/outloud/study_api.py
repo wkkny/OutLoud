@@ -24,6 +24,15 @@ class ReferenceInput(BaseModel):
     topic_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
+class GuidanceInput(BaseModel):
+    assistant_message_id: str = Field(min_length=1, max_length=128)
+    topic_id: str = Field(min_length=1, max_length=128)
+
+
+class QuestionInput(GuidanceInput):
+    question: str = Field(min_length=1, max_length=12000)
+
+
 def study_router(app, complete_write, require_client):
     router = APIRouter(prefix='/study')
 
@@ -58,6 +67,22 @@ def study_router(app, complete_write, require_client):
     @router.get('/conversations/{conversation_id}')
     async def study_conversation(conversation_id: str):
         return await read(app.state.study.session, conversation_id)
+
+    @router.get('/conversations/{conversation_id}/guidance')
+    async def guidance_state(conversation_id: str):
+        return await read(app.state.study.guidance_state, conversation_id)
+
+    @router.post('/conversations/{conversation_id}/guidance')
+    async def mark_guidance(conversation_id: str, body: GuidanceInput):
+        return await complete_write(read(app.state.study.mark_guidance, conversation_id, body.assistant_message_id, body.topic_id))
+
+    @router.delete('/conversations/{conversation_id}/guidance/{assistant_message_id}')
+    async def discard_guidance(conversation_id: str, assistant_message_id: str, topic_id: str):
+        return await complete_write(read(app.state.study.discard_guidance, conversation_id, assistant_message_id, topic_id))
+
+    @router.post('/conversations/{conversation_id}/question')
+    async def activate_question(conversation_id: str, body: QuestionInput):
+        return await complete_write(read(app.state.study.activate_question, conversation_id, body.assistant_message_id, body.topic_id, body.question))
 
     @router.post('/subjects/{subject_id}/uploads', status_code=201)
     async def upload(subject_id: str, request: Request, name: str, role: Literal['syllabus', 'reference'], pages: str = '', session_id=Depends(require_client)):

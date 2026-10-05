@@ -44,7 +44,7 @@ function UploadReview({ upload, subject, pending, onApprove }: { upload: StudyUp
   </div></details>
 }
 
-export function StudyArea({ library, connected, sessionId, onOpenConversation }: { library: ConversationLibrary; connected: boolean; sessionId: string | null; onOpenConversation: () => void }) {
+export function StudyArea({ library, connected, sessionId, onOpenConversation, onSubjectsChanged }: { library: ConversationLibrary; connected: boolean; sessionId: string | null; onOpenConversation: () => void; onSubjectsChanged?: (subjects: StudySubject[]) => void }) {
   const [subjects, setSubjects] = useState<StudySubject[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(() => { try { return localStorage.getItem('outloud.study-subject') } catch { return null } })
   const [editor, setEditor] = useState<'new' | 'edit' | null>(null)
@@ -57,9 +57,9 @@ export function StudyArea({ library, connected, sessionId, onOpenConversation }:
   const [deleteTarget, setDeleteTarget] = useState<{ kind: 'subject' | 'upload'; id: string; name: string } | null>(null)
   const selected = subjects.find(subject => subject.id === selectedId)
   const refresh = useCallback(async () => {
-    try { const next = await listSubjects(); setSubjects(next); setSelectedId(previous => next.some(subject => subject.id === previous) ? previous : next[0]?.id ?? null); setError(null) }
+    try { const next = await listSubjects(); setSubjects(next); onSubjectsChanged?.(next); setSelectedId(previous => next.some(subject => subject.id === previous) ? previous : next[0]?.id ?? null); setError(null) }
     catch (error) { setError(failureText(error)) }
-  }, [])
+  }, [onSubjectsChanged])
   useEffect(() => { void Promise.resolve().then(refresh); const timer = setInterval(() => { if (document.visibilityState === 'visible' && connected) void refresh() }, 15000); return () => clearInterval(timer) }, [refresh, connected])
   useEffect(() => { try { if (selectedId) localStorage.setItem('outloud.study-subject', selectedId) } catch { /* In-memory selection remains usable. */ } }, [selectedId])
   const run = async (operation: () => Promise<void>) => { if (pending) return; setPending(true); setError(null); try { await operation() } catch (error) { setError(failureText(error)) } finally { setPending(false) } }

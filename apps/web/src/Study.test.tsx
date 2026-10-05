@@ -27,7 +27,7 @@ it('creates a study subject with exam setup and unassessed syllabus coverage', a
   render(<App />)
   await waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
   await act(async () => FakeSocket.instances[0]!.ready())
-  fireEvent.click(screen.getByRole('button', { name: 'Study' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Study dashboard' }))
   fireEvent.change(await screen.findByRole('textbox', { name: 'Subject name' }), { target: { value: 'DBMS' } })
   fireEvent.change(screen.getByRole('textbox', { name: 'Topics, one per line' }), { target: { value: 'Normalization\nTransactions' } })
   fireEvent.change(screen.getByRole('combobox', { name: 'Exam type' }), { target: { value: 'written' } })
@@ -39,6 +39,7 @@ it('creates a study subject with exam setup and unassessed syllabus coverage', a
 })
 
 it('shows study recording levels and keeps dictated answers for review before Enter sends', async () => {
+  backend.conversations.get('chat-1')!.mode = 'study'
   const topic = { id: 'topic-1', name: 'Normalization', coverage: '', weight: null, active: 1, revision: 1, judgment: 'not_assessed', assessment: null, history: [], needs_reassessment: false }
   const subject = { id: 'subject-1', name: 'DBMS', exam_type: 'written', level: '', exam_date: '', topics: [topic], uploads: [], revision_order: ['topic-1'], coverage: { total: 1, assessed: 0, demonstrated: 0 } }
   const baseFetch = backend.fetchMock.getMockImplementation()!
@@ -70,7 +71,7 @@ it('shows study recording levels and keeps dictated answers for review before En
   expect(backend.requests.filter(request => request.path === '/chat')).toHaveLength(0)
   expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
   await screen.findByText('Local reply')
-  expect(backend.requests.find(request => request.path === '/chat')?.body.messages).toEqual([{ role: 'user', content: 'Saved words\nMy spoken explanation' }])
+  expect(backend.requests.find(request => request.path === '/chat')?.body).toMatchObject({ messages: [{ role: 'user', content: 'Saved words\nMy spoken explanation' }], mode: 'study' })
 })
 
 it.each([
@@ -78,6 +79,7 @@ it.each([
   ['cancelled', 'practice', 'Give me a fresh practice question.'],
   ['failed', 'finish', 'Summarize my study progress and revision priorities.'],
 ] as const)('retries %s study feedback with its saved %s action and preserves the reviewed draft', async (status, action, text) => {
+  backend.conversations.get('chat-1')!.mode = 'study'
   const topic = { id: 'topic-1', name: 'Normalization', coverage: '', weight: null, active: 1, revision: 1, judgment: 'not_assessed', assessment: null, history: [], needs_reassessment: false }
   const subject = { id: 'subject-1', name: 'DBMS', exam_type: 'written', level: '', exam_date: '', topics: [topic], uploads: [], revision_order: ['topic-1'], coverage: { total: 1, assessed: 0, demonstrated: 0 } }
   backend.conversations.get('chat-1')!.messages = [
