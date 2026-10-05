@@ -61,6 +61,14 @@ class StudyStore:
                     question TEXT NOT NULL, hinted INTEGER NOT NULL DEFAULT 0,
                     finished INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS study_guidance (
+                    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    topic_id TEXT NOT NULL REFERENCES study_topics(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL, consumed_by TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL, is_excluded INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(assistant_message_id, topic_id)
+                );
             ''')
             columns = {row[1] for row in self.db.execute('PRAGMA table_info(study_topics)')}
             if 'reassessment' not in columns:
@@ -68,6 +76,9 @@ class StudyStore:
             session_columns = {row[1] for row in self.db.execute('PRAGMA table_info(study_sessions)')}
             if 'last_action' not in session_columns:
                 self.db.execute("ALTER TABLE study_sessions ADD COLUMN last_action TEXT NOT NULL DEFAULT 'answer'")
+            guidance_columns = {row[1] for row in self.db.execute('PRAGMA table_info(study_guidance)')}
+            if 'is_excluded' not in guidance_columns:
+                self.db.execute('ALTER TABLE study_guidance ADD COLUMN is_excluded INTEGER NOT NULL DEFAULT 0')
             conversations.on_delete = self.before_delete_conversation
 
     def list(self):
@@ -126,7 +137,119 @@ class StudyStore:
             for row in self.db.execute('SELECT id FROM study_topics WHERE subject_id=?', (subject_id,)).fetchall():
                 if row[0] not in seen:
                     self.db.execute('UPDATE study_topics SET active=0 WHERE id=?', (row[0],))
+            for conversation in self.db.execute('SELECT id,topic_ids,focus_topic_id FROM conversations WHERE subject_id=?', (subject_id,)).fetchall():
+                selected = [topic_id for topic_id in json.loads(conversation['topic_ids']) if topic_id in seen]
+                focus = conversation['focus_topic_id'] if conversation['focus_topic_id'] in selected else (selected[0] if selected else None)
+                if selected != json.loads(conversation['topic_ids']) or focus != conversation['focus_topic_id']:
+                    self.db.execute('UPDATE conversations SET topic_ids=?,focus_topic_id=? WHERE id=?', (json.dumps(selected), focus, conversation['id']))
             return self.get(subject_id)
+
+    def validate_workspace(self, subject_id, topic_ids, focus_topic_id):
+        if subject_id is None:
+            if topic_ids or focus_topic_id is not None:
+                raise ValueError('Topics require a subject')
+            return
+        subject = self.get(subject_id)
+        active = {topic['id'] for topic in subject['topics'] if topic['active']}
+        if len(topic_ids) != len(set(topic_ids)) or not set(topic_ids).issubset(active):
+            raise ValueError('Selected topics must be active and belong to this subject')
+        if focus_topic_id is not None and focus_topic_id not in topic_ids:
+            raise ValueError('Focus topic must be one of the selected topics')
+
+    def ensure_session(self, conversation_id, subject_id, focus_topic_id):
+        with self.lock, self.db:
+            subject = self.get(subject_id)
+            if focus_topic_id not in {topic['id'] for topic in subject['topics'] if topic['active']}:
+                raise ValueError('Focus topic must be active and belong to this subject')
+            cursor = self.db.execute('INSERT OR IGNORE INTO study_sessions(conversation_id,topic_id,question) VALUES(?,?,?)', (conversation_id, focus_topic_id, ''))
+            if cursor.rowcount == 0:
+                self.db.execute("UPDATE study_sessions SET topic_id=?,question='',hinted=0,finished=0,last_action='answer' WHERE conversation_id=? AND topic_id<>?", (focus_topic_id, conversation_id, focus_topic_id))
+            self.db.execute('UPDATE conversations SET subject_id=?,mode=\'study\',focus_topic_id=? WHERE id=?', (subject_id, focus_topic_id, conversation_id))
+
+    def reset_session_after_move(self, conversation_id, subject_id, mode, focus_topic_id):
+        """Discard only conversation-local question state when its subject changes."""
+        with self.lock, self.db:
+            self.db.execute('DELETE FROM study_sessions WHERE conversation_id=?', (conversation_id,))
+            if subject_id is not None and mode == 'study' and focus_topic_id is not None:
+                self.ensure_session(conversation_id, subject_id, focus_topic_id)
+
+    def clear_session(self, conversation_id):
+        with self.lock, self.db:
+            self.db.execute('DELETE FROM study_sessions WHERE conversation_id=?', (conversation_id,))
+
+    def mark_guidance(self, conversation_id, assistant_message_id, topic_id):
+        with self.lock, self.db:
+            conversation = self.db.execute('SELECT subject_id FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+            if conversation is None:
+                raise LookupError('Conversation not found')
+            if conversation['subject_id'] is None:
+                raise ValueError('Assign this conversation to a subject before marking study guidance')
+            topic = self.db.execute('SELECT subject_id,active FROM study_topics WHERE id=?', (topic_id,)).fetchone()
+            if topic is None or topic['subject_id'] != conversation['subject_id'] or not topic['active']:
+                raise ValueError('Guidance topic must be active and belong to this conversation subject')
+            message = self.db.execute('SELECT role,status,content FROM messages WHERE id=? AND conversation_id=?', (assistant_message_id, conversation_id)).fetchone()
+            if message is None or message['role'] != 'assistant' or message['status'] not in ('complete', 'failed', 'cancelled') or not message['content'].strip():
+                raise ValueError('Choose an assistant reply with delivered text')
+            session = self.db.execute('SELECT topic_id,question FROM study_sessions WHERE conversation_id=?', (conversation_id,)).fetchone()
+            question = session['question'] if session is not None and session['topic_id'] == topic_id else ''
+            return self._record_guidance(conversation_id, assistant_message_id, topic_id, question)
+
+    def _record_guidance(self, conversation_id, assistant_message_id, topic_id, question=''):
+        guidance_id = str(uuid.uuid4())
+        self.db.execute('INSERT OR IGNORE INTO study_guidance(id,conversation_id,assistant_message_id,topic_id,question,created_at) VALUES(?,?,?,?,?,?)', (guidance_id, conversation_id, assistant_message_id, topic_id, question, now()))
+        self.db.execute('UPDATE study_guidance SET is_excluded=0 WHERE conversation_id=? AND assistant_message_id=? AND topic_id=? AND consumed_by IS NULL', (conversation_id, assistant_message_id, topic_id))
+        row = self.db.execute('SELECT id,conversation_id,assistant_message_id,topic_id,question,created_at,is_excluded FROM study_guidance WHERE assistant_message_id=? AND topic_id=?', (assistant_message_id, topic_id)).fetchone()
+        return dict(row)
+
+    def record_delivered_guidance(self, conversation_id, assistant_message_id, topic_id):
+        """Treat a completed, topic-scoped Chat reply as support for that topic."""
+        with self.lock:
+            conversation = self.db.execute('SELECT subject_id FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+            topic = self.db.execute('SELECT subject_id,active FROM study_topics WHERE id=?', (topic_id,)).fetchone()
+            message = self.db.execute('SELECT role,status,content FROM messages WHERE id=? AND conversation_id=?', (assistant_message_id, conversation_id)).fetchone()
+            if conversation is None or conversation['subject_id'] is None or topic is None or topic['subject_id'] != conversation['subject_id'] or not topic['active'] or message is None or message['role'] != 'assistant' or message['status'] not in ('complete', 'failed', 'cancelled') or not message['content'].strip():
+                return None
+            session = self.db.execute('SELECT question FROM study_sessions WHERE conversation_id=? AND topic_id=?', (conversation_id, topic_id)).fetchone()
+            return self._record_guidance(conversation_id, assistant_message_id, topic_id, session['question'] if session else '')
+
+    def discard_guidance(self, conversation_id, assistant_message_id, topic_id):
+        """Let the learner exclude an unrelated scoped Chat reply before an attempt."""
+        with self.lock, self.db:
+            conversation = self.db.execute('SELECT subject_id FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+            topic = self.db.execute('SELECT subject_id FROM study_topics WHERE id=?', (topic_id,)).fetchone()
+            if conversation is None:
+                raise LookupError('Conversation not found')
+            if conversation['subject_id'] is None or topic is None or topic['subject_id'] != conversation['subject_id']:
+                raise ValueError('Guidance topic must belong to this conversation subject')
+            return bool(self.db.execute('UPDATE study_guidance SET is_excluded=1 WHERE conversation_id=? AND assistant_message_id=? AND topic_id=? AND consumed_by IS NULL', (conversation_id, assistant_message_id, topic_id)).rowcount)
+
+    def guidance_state(self, conversation_id):
+        with self.lock:
+            return [{'assistant_message_id': row['assistant_message_id'], 'topic_id': row['topic_id'], 'excluded': bool(row['is_excluded'])} for row in self.db.execute('SELECT assistant_message_id,topic_id,is_excluded FROM study_guidance WHERE conversation_id=?', (conversation_id,))]
+
+    def activate_question(self, conversation_id, assistant_message_id, topic_id, question):
+        question = question.strip()
+        if not question or len(question) > 12000:
+            raise ValueError('Question must be between 1 and 12,000 characters')
+        with self.lock, self.db:
+            conversation = self.db.execute('SELECT subject_id,mode FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+            if conversation is None:
+                raise LookupError('Conversation not found')
+            if conversation['subject_id'] is None or conversation['mode'] != 'study':
+                raise ValueError('Switch this conversation to Study mode before saving a question')
+            topic = self.db.execute('SELECT subject_id,active FROM study_topics WHERE id=?', (topic_id,)).fetchone()
+            if topic is None or topic['subject_id'] != conversation['subject_id'] or not topic['active']:
+                raise ValueError('Question topic must be active and belong to this conversation subject')
+            assistant = self.db.execute('SELECT role,status,rowid FROM messages WHERE id=? AND conversation_id=?', (assistant_message_id, conversation_id)).fetchone()
+            if assistant is None or assistant['role'] != 'assistant' or assistant['status'] != 'complete':
+                raise ValueError('Choose a completed assistant reply')
+            source = self.db.execute("SELECT turn_context FROM messages WHERE conversation_id=? AND role='user' AND rowid<? ORDER BY rowid DESC LIMIT 1", (conversation_id, assistant['rowid'])).fetchone()
+            context = json.loads(source['turn_context']) if source and source['turn_context'] else None
+            if context is None or context.get('mode') != 'study' or context.get('focus_topic_id') != topic_id:
+                raise ValueError('Choose a reply generated in Study mode for this topic')
+            self.db.execute('INSERT OR IGNORE INTO study_sessions(conversation_id,topic_id,question) VALUES(?,?,?)', (conversation_id, topic_id, ''))
+            self.db.execute('UPDATE study_sessions SET topic_id=?,question=?,hinted=0,finished=0 WHERE conversation_id=?', (topic_id, question, conversation_id))
+            return self.session(conversation_id)
 
     def start_conversation(self, subject_id, topic_id):
         with self.lock, self.db:
@@ -134,8 +257,8 @@ class StudyStore:
             topic = next((item for item in subject['topics'] if item['id'] == topic_id and item['active']), None)
             if topic is None:
                 raise LookupError('Active topic not found')
-            conversation = self.conversations.create(f"{subject['name']} · {topic['name']}")
-            self.db.execute('INSERT INTO study_sessions(conversation_id,topic_id,question) VALUES(?,?,?)', (conversation['id'], topic_id, f"Explain {topic['name']} in your own words. Include a concrete example and what you find difficult."))
+            conversation = self.conversations.create(f"{subject['name']} · {topic['name']}", subject_id=subject_id, mode='study', topic_ids=[topic_id], focus_topic_id=topic_id)
+            self.db.execute('INSERT INTO study_sessions(conversation_id,topic_id,question) VALUES(?,?,?)', (conversation['id'], topic_id, ''))
             return self.session(conversation['id'])
 
     def session(self, conversation_id):
@@ -220,14 +343,22 @@ class StudyStore:
                 valid_ids.add(own_id)
         return eligible
 
-    def prepare(self, conversation_id, action):
+    def prepare(self, conversation_id, action, focus_topic_id=None, question_override=None, assisted_override=None):
         with self.lock:
             session = self.session(conversation_id)
             if session is None:
                 return None
             topic, subject = session['topic'], session['subject']
+            if focus_topic_id is not None:
+                selected = next((item for item in subject['topics'] if item['id'] == focus_topic_id and item['active']), None)
+                if selected is None:
+                    raise ValueError('Focus topic must be active and belong to this subject')
+                topic = selected
             if not topic['active']:
                 raise ValueError('Topic was removed from the active syllabus. Choose an active topic.')
+            question = question_override if question_override is not None else session['question'] if topic['id'] == session['topic']['id'] else ''
+            available_guidance = [row['id'] for row in self.db.execute('SELECT id FROM study_guidance WHERE conversation_id=? AND topic_id=? AND consumed_by IS NULL AND is_excluded=0 ORDER BY created_at,rowid', (conversation_id, topic['id']))]
+            hinted = bool(assisted_override) if assisted_override is not None else bool(session['hinted']) or bool(available_guidance)
             references, remaining, reference_context_incomplete = [], 4000, False
             for upload in self.applicable_references(topic['id'], subject['uploads']):
                 text = upload['text'][:min(2000, remaining)]
@@ -236,11 +367,14 @@ class StudyStore:
                     references.append({'id': upload['id'], 'name': upload['name'] + ' pages ' + ','.join(map(str, upload['pages'])), 'text': text})
                     remaining -= len(text)
             prior = [item for item in self.valid_evidence(topic, topic['history'], subject['uploads']) if item['action'] == 'answer' and not item['hinted'] and not item['result']['provisional'] and set(item['result']['sources']).issubset({ref['id'] for ref in references})]
-            return {'conversation_id': conversation_id, 'topic_id': topic['id'], 'revision': topic['revision'], 'topic': topic['name'], 'coverage': topic['coverage'][:1000], 'exam_type': subject['exam_type'], 'level': subject['level'], 'action': action, 'question': session['question'], 'hinted': bool(session['hinted']), 'references': references, 'reference_context_incomplete': reference_context_incomplete, 'independent_count': len(prior), 'previous_evidence': list({evidence_id for item in prior[-2:] for evidence_id in [item['user_message_id'], *item['result'].get('evidence_ids', [])]}), 'previous_answers': [{'question': item['question'], 'answer': item['answer'][:800]} for item in prior[-2:]], 'topic_progress': [{'name': item['name'], 'judgment': item['judgment'], 'exam_importance': item['weight']} for item in subject['topics'] if item['active']][:10], 'subject_coverage': subject['coverage']}
+            return {'conversation_id': conversation_id, 'topic_id': topic['id'], 'revision': topic['revision'], 'topic': topic['name'], 'coverage': topic['coverage'][:1000], 'exam_type': subject['exam_type'], 'level': subject['level'], 'action': action, 'question': question, 'hinted': hinted, 'guidance_ids': available_guidance, 'references': references, 'reference_context_incomplete': reference_context_incomplete, 'independent_count': len(prior), 'previous_evidence': list({evidence_id for item in prior[-2:] for evidence_id in [item['user_message_id'], *item['result'].get('evidence_ids', [])]}), 'previous_answers': [{'question': item['question'], 'answer': item['answer'][:800]} for item in prior[-2:]], 'topic_progress': [{'name': item['name'], 'judgment': item['judgment'], 'exam_importance': item['weight']} for item in subject['topics'] if item['active']][:10], 'subject_coverage': subject['coverage']}
 
-    def begin_attempt(self, plan):
+    def begin_attempt(self, plan, user_message_id=None):
         # Shares the accepted user turn's transaction, including interrupted turns.
         self.db.execute('UPDATE study_sessions SET last_action=? WHERE conversation_id=?', (plan['action'], plan['conversation_id']))
+        if user_message_id is not None and plan.get('guidance_ids'):
+            placeholders = ','.join('?' for _ in plan['guidance_ids'])
+            self.db.execute(f'UPDATE study_guidance SET consumed_by=? WHERE id IN ({placeholders}) AND consumed_by IS NULL', (user_message_id, *plan['guidance_ids']))
 
     def complete(self, plan, result, user_message_id):
         # Called inside the conversation's completion transaction and lock.
@@ -258,7 +392,7 @@ class StudyStore:
             result = {**result, 'judgment': 'not_assessed', 'gaps': [], 'provisional': True, 'rendered': rendered}
         result = {**result, 'evidence_ids': [*plan['previous_evidence'], user_message_id]}
         self.db.execute('INSERT INTO study_evidence VALUES(?,?,?,?,?,?,?,?)', (user_message_id, plan['topic_id'], plan['revision'], now(), plan['question'], plan['action'], plan['hinted'], json.dumps(result)))
-        self.db.execute('UPDATE study_sessions SET question=?,hinted=?,finished=? WHERE conversation_id=?', (result['question'] or plan['question'], int(plan['action'] == 'explain'), int(plan['action'] == 'finish'), plan['conversation_id']))
+        self.db.execute('UPDATE study_sessions SET topic_id=?,question=?,hinted=?,finished=? WHERE conversation_id=?', (plan['topic_id'], result['question'] or plan['question'], int(plan['action'] == 'explain'), int(plan['action'] == 'finish'), plan['conversation_id']))
         return result
 
     def delete_upload(self, upload_id):
@@ -271,10 +405,39 @@ class StudyStore:
         with self.lock, self.db:
             self.get(subject_id)
             conversations = [row[0] for row in self.db.execute('SELECT s.conversation_id FROM study_sessions s JOIN study_topics t ON t.id=s.topic_id WHERE t.subject_id=?', (subject_id,))]
+            self.db.execute("UPDATE conversations SET subject_id=NULL,mode='chat',topic_ids='[]',focus_topic_id=NULL WHERE subject_id=? AND id NOT IN (SELECT conversation_id FROM study_sessions)", (subject_id,))
             for conversation_id in conversations:
                 self.conversations.delete(conversation_id)
             self.db.execute('DELETE FROM study_subjects WHERE id=?', (subject_id,))
             return conversations
+
+    def workspace_context(self, conversation_id, topic_ids, focus_topic_id):
+        """Build scoped context from approved references and saved topic progress."""
+        with self.lock:
+            conversation = self.db.execute('SELECT subject_id FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+            if conversation is None or conversation['subject_id'] is None:
+                return None
+            subject = self.get(conversation['subject_id'])
+            selected = set(topic_ids or [])
+            topics = [topic for topic in subject['topics'] if topic['active'] and (not selected or topic['id'] in selected)]
+            if focus_topic_id is not None:
+                topics.sort(key=lambda topic: topic['id'] != focus_topic_id)
+            lines = [f"Course: {subject['name']}"]
+            for topic in topics[:10]:
+                assessment = topic.get('assessment')
+                progress = assessment['judgment'] if assessment else 'not assessed'
+                lines.append(f"Topic: {topic['name']} · progress: {progress}. Coverage: {topic['coverage'][:500]}")
+            remaining = 6000
+            for upload in subject['uploads']:
+                if upload['role'] != 'reference' or not upload['approved'] or (upload['topic_ids'] and not selected.intersection(upload['topic_ids'])):
+                    continue
+                excerpt = upload['text'][:min(1500, remaining)]
+                if excerpt:
+                    lines.append(f"Approved reference: {upload['name']}\n{excerpt}")
+                    remaining -= len(excerpt)
+                if remaining <= 0:
+                    break
+            return '\n\n'.join(lines)
 
 
     def before_delete_conversation(self, conversation_id):

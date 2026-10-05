@@ -6,6 +6,7 @@ const pendingSendsKey = 'outloud.pending-sends'
 const pendingSendSchema = z.object({
   id: z.string(), conversationId: z.string().nullable(), text: z.string(),
   createdAt: z.string(), delivery: z.enum(['sending', 'failed']), studyAction: studyActionSchema.optional(),
+  mode: z.enum(['study', 'chat']).optional(), topic_ids: z.array(z.string()).optional(), focus_topic_id: z.string().nullable().optional(),
 })
 export type PendingSend = z.infer<typeof pendingSendSchema>
 const recoveryStorage = () => window.outloudDesktop?.managedBackend ? localStorage : sessionStorage

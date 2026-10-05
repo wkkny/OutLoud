@@ -28,6 +28,10 @@ class ChatRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
     study_action: Literal['answer', 'explain', 'practice', 'finish'] = 'answer'
+    mode: Literal['study', 'chat'] | None = None
+    topic_ids: list[str] | None = Field(default=None, max_length=200)
+    focus_topic_id: str | None = None
+    retry_of_message_id: str | None = Field(default=None, max_length=128)
     messages: list[ChatMessage] = Field(min_length=1, max_length=65)
 
     @model_validator(mode="after")
@@ -195,6 +199,19 @@ class Chat:
         operation = asyncio.create_task(asyncio.to_thread(method, *args))
         return await drain(operation)
 
+    @staticmethod
+    def turn_context(request, plan=None, workspace_context=None):
+        return {
+            "mode": request.mode or "chat",
+            "topic_ids": request.topic_ids,
+            "focus_topic_id": plan["topic_id"] if plan else request.focus_topic_id,
+            "question": plan["question"] if plan else "",
+            "action": plan["action"] if plan else "chat",
+            "assisted": bool(plan["hinted"]) if plan else False,
+            "study_plan": {key: value for key, value in plan.items() if key not in ("conversation_id", "guidance_ids")} if plan else None,
+            "workspace_context": workspace_context,
+        }
+
     async def generate(self, generation):
         started = time.monotonic()
         terminal = generation.event("error", message="Ollama ended without a complete reply.")
@@ -202,6 +219,8 @@ class Chat:
         turn_started = False
         reply = ""
         study_plan, study_result = None, None
+        retry_context = None
+        workspace_context = None
         action = generation.request.study_action
         try:
             if self.store is not None:
@@ -216,23 +235,54 @@ class Chat:
                     request_id=generation.request.request_id,
                     conversation_id=generation.request.conversation_id,
                     messages=[*history, generation.request.messages[-1]], study_action=action,
+                    mode=generation.request.mode, topic_ids=generation.request.topic_ids,
+                    focus_topic_id=generation.request.focus_topic_id,
+                    retry_of_message_id=generation.request.retry_of_message_id,
                 )
+                if generation.request.retry_of_message_id:
+                    retry_record = await self.storage(self.store.failed_turn_context, generation.request.conversation_id, generation.request.retry_of_message_id)
+                    if retry_record is None:
+                        raise ValueError('The accepted turn has no saved retry context')
+                    if retry_record['content'] != generation.request.messages[-1].content:
+                        raise ValueError('A retry must keep the original accepted message text')
+                    retry_context = retry_record['context']
+                    generation.request = generation.request.model_copy(update={
+                        'mode': retry_context['mode'], 'topic_ids': retry_context['topic_ids'],
+                        'focus_topic_id': retry_context['focus_topic_id'],
+                    })
+                    if retry_context['action'] in ('answer', 'explain', 'practice', 'finish'):
+                        action = retry_context['action']
             payload = {"model": MODEL, "messages": generation.request.context(), "stream": True,
                        "options": {"num_ctx": CONTEXT_TOKENS, "num_predict": 1024}, "keep_alive": "2m"}
-            if self.study is not None:
-                study_plan = await self.storage(self.study.prepare, generation.request.conversation_id, action)
+            retry_question = retry_context.get('question') if generation.request.retry_of_message_id else None
+            if self.study is not None and generation.request.mode == 'study' and generation.request.focus_topic_id is not None:
+                study_plan = await self.storage(self.study.prepare, generation.request.conversation_id, action, generation.request.focus_topic_id, retry_question, retry_context.get('assisted') if generation.request.retry_of_message_id else None)
+                if study_plan is not None and retry_context and retry_context.get('study_plan'):
+                    study_plan = {**study_plan, **retry_context['study_plan'], 'conversation_id': generation.request.conversation_id, 'guidance_ids': []}
+                # A newly opened Study conversation has no active question. Treat
+                # its first learner message as ordinary discussion until there is
+                # a saved question to answer; never grade against an invisible prompt.
+                if study_plan is not None and not study_plan['question'].strip():
+                    study_plan = None
             if study_plan is not None:
-                payload['messages'] = [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': json.dumps({key: value for key, value in {**study_plan, 'latest_answer': generation.request.messages[-1].content}.items() if key not in ('conversation_id', 'topic_id', 'previous_evidence')}, ensure_ascii=False)}]
+                payload['messages'] = [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': json.dumps({key: value for key, value in {**study_plan, 'latest_answer': generation.request.messages[-1].content}.items() if key not in ('conversation_id', 'topic_id', 'previous_evidence', 'guidance_ids')}, ensure_ascii=False)}]
                 payload['format'] = StudyReply.model_json_schema()
                 payload['options']['temperature'] = 0
                 # Save a reviewed study answer before waiting for model feedback.
-                inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id, lambda: self.study.begin_attempt(study_plan))
+                turn_context = self.turn_context(generation.request, study_plan)
+                inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id, lambda: self.study.begin_attempt(study_plan, f'{turn_id}-user'), turn_context)
                 if not inserted:
                     terminal = await self.replay(generation, await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id))
                     return
                 turn_started = True
                 self.on_change(generation.request.conversation_id)
                 await generation.queue.put(generation.event('started', model=MODEL, context_tokens=CONTEXT_TOKENS))
+            elif self.study is not None and generation.request.mode in ('chat', 'study'):
+                workspace_context = retry_context.get('workspace_context') if generation.request.retry_of_message_id else None
+                if not generation.request.retry_of_message_id:
+                    workspace_context = await self.storage(self.study.workspace_context, generation.request.conversation_id, generation.request.topic_ids, generation.request.focus_topic_id)
+                if workspace_context:
+                    payload['messages'].insert(0, {'role': 'system', 'content': 'Use this saved course context when it is relevant to the learner\'s request. Do not turn discussion into an assessment unless a visible question has been saved.\n\n' + workspace_context})
             async with asyncio.timeout(180), self.client_factory() as client:
                 async with client.stream("POST", "/api/chat", json=payload) as response:
                     if response.status_code == 404:
@@ -266,7 +316,7 @@ class Chat:
                                 if leading.strip():
                                     if self.store is not None:
                                         turn_started = True
-                                        inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id)
+                                        inserted = await self.storage(self.store.start_turn, generation.request.conversation_id, turn_id, generation.request.messages[-1].content, generation.request.request_id, None, self.turn_context(generation.request, workspace_context=workspace_context))
                                         if not inserted:
                                             turn_started = False
                                             saved = await self.storage(self.store.request_messages, generation.request.conversation_id, generation.request.request_id)
@@ -323,7 +373,14 @@ class Chat:
             if turn_started:
                 status = {"chat.done": "complete", "chat.cancelled": "cancelled"}.get(terminal["type"], "failed")
                 try:
-                    callback = (lambda user_id: self.study.complete(study_plan, study_result, user_id)) if study_result is not None else None
+                    def complete_turn(user_id):
+                        result = self.study.complete(study_plan, study_result, user_id) if study_result is not None and status == 'complete' else None
+                        if status == 'complete' and generation.request.mode == 'chat' and generation.request.focus_topic_id:
+                            self.study.record_delivered_guidance(generation.request.conversation_id, f'{turn_id}-assistant', generation.request.focus_topic_id)
+                        elif status in ('failed', 'cancelled') and generation.request.mode == 'chat' and generation.request.focus_topic_id and reply.strip():
+                            self.study.record_delivered_guidance(generation.request.conversation_id, f'{turn_id}-assistant', generation.request.focus_topic_id)
+                        return result
+                    callback = complete_turn if study_result is not None or (generation.request.mode == 'chat' and generation.request.focus_topic_id) else None
                     if study_plan is not None and study_result is None:
                         reply = ''  # Never persist malformed JSON as user-visible feedback.
                     saved_result = await self.storage(self.store.finish_turn, generation.request.conversation_id, turn_id, reply, status, terminal.get("metrics"), callback)

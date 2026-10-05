@@ -63,3 +63,28 @@ class ConversationStoreTests(unittest.TestCase):
         messages = self.store.get(conversation["id"])["messages"]
         self.assertEqual([message["status"] for message in messages], ["complete", "complete"])
         self.assertEqual(messages[1]["metrics"], {"elapsed_seconds": 1})
+
+    def test_workspace_and_turn_context_survive_reopen(self):
+        conversation = self.store.create("Study notes", subject_id="subject-1", mode="study", topic_ids=["topic-1", "topic-2"], focus_topic_id="topic-2")
+        self.store.start_turn(conversation["id"], "turn", "Explain the difference", request_id="request", turn_context={"mode": "study", "topic_ids": ["topic-1", "topic-2"], "focus_topic_id": "topic-2", "question": "Compare these cases"})
+        self.reopen()
+        saved = self.store.get(conversation["id"])
+        self.assertEqual(saved["subject_id"], "subject-1")
+        self.assertEqual(saved["mode"], "study")
+        self.assertEqual(saved["topic_ids"], ["topic-1", "topic-2"])
+        self.assertEqual(saved["focus_topic_id"], "topic-2")
+        self.assertEqual(saved["messages"][0]["turn_context"], {"mode": "study", "topic_ids": ["topic-1", "topic-2"], "focus_topic_id": "topic-2", "question": "Compare these cases"})
+
+    def test_old_conversation_schema_migrates_to_unassigned_chat(self):
+        self.store.close()
+        self.path.unlink()
+        import sqlite3
+        database = sqlite3.connect(self.path)
+        database.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, draft TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        database.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES('legacy','Legacy','2025-01-01','2025-01-01')")
+        database.commit()
+        database.close()
+        self.store = ConversationStore(self.path)
+        self.assertEqual(self.store.get("legacy")["subject_id"], None)
+        self.assertEqual(self.store.get("legacy")["mode"], "chat")
+        self.assertEqual(self.store.get("legacy")["topic_ids"], [])

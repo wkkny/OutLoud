@@ -12,6 +12,9 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+_UNSET = object()
+
+
 class DraftConflict(RuntimeError):
     pass
 
@@ -45,9 +48,19 @@ class ConversationStore:
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(conversations)")}
         if "draft_version" not in columns:
             self.db.execute("ALTER TABLE conversations ADD COLUMN draft_version INTEGER NOT NULL DEFAULT 0")
+        if "subject_id" not in columns:
+            self.db.execute("ALTER TABLE conversations ADD COLUMN subject_id TEXT")
+        if "mode" not in columns:
+            self.db.execute("ALTER TABLE conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'")
+        if "topic_ids" not in columns:
+            self.db.execute("ALTER TABLE conversations ADD COLUMN topic_ids TEXT NOT NULL DEFAULT '[]'")
+        if "focus_topic_id" not in columns:
+            self.db.execute("ALTER TABLE conversations ADD COLUMN focus_topic_id TEXT")
         message_columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
         if "request_id" not in message_columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN request_id TEXT")
+        if "turn_context" not in message_columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN turn_context TEXT")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_by_request ON messages(conversation_id, request_id, role) WHERE request_id IS NOT NULL")
         # No model task survives a backend restart. Retain interrupted turns for
         # recovery, but never include them in subsequent model context.
@@ -56,32 +69,40 @@ class ConversationStore:
 
     def list(self):
         with self.lock:
-            rows = self.db.execute("SELECT id, title, draft, draft_version, created_at, updated_at FROM conversations ORDER BY updated_at DESC, id").fetchall()
-            return [dict(row) for row in rows]
+            rows = self.db.execute("SELECT id, title, draft, draft_version, subject_id, mode, topic_ids, focus_topic_id, created_at, updated_at FROM conversations ORDER BY updated_at DESC, id").fetchall()
+            return [self._conversation_dict(row) for row in rows]
+
+    @staticmethod
+    def _conversation_dict(row):
+        result = dict(row)
+        result["topic_ids"] = json.loads(result["topic_ids"])
+        return result
 
     def get(self, conversation_id):
         with self.lock:
-            row = self.db.execute("SELECT id, title, draft, draft_version, created_at, updated_at FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            row = self.db.execute("SELECT id, title, draft, draft_version, subject_id, mode, topic_ids, focus_topic_id, created_at, updated_at FROM conversations WHERE id=?", (conversation_id,)).fetchone()
             if row is None:
                 return None
-            result = dict(row)
+            result = self._conversation_dict(row)
             result["messages"] = [dict(message) for message in self.db.execute(
-                "SELECT id, role, content, status, metrics, created_at, request_id FROM messages WHERE conversation_id=? ORDER BY rowid",
+                "SELECT id, role, content, status, metrics, turn_context, created_at, request_id FROM messages WHERE conversation_id=? ORDER BY rowid",
                 (conversation_id,),
             )]
             for message in result["messages"]:
                 if message["metrics"] is not None:
                     message["metrics"] = json.loads(message["metrics"])
+                if message["turn_context"] is not None:
+                    message["turn_context"] = json.loads(message["turn_context"])
             return result
 
-    def create(self, title="New chat"):
+    def create(self, title="New chat", subject_id=None, mode="chat", topic_ids=None, focus_topic_id=None):
         conversation_id = str(uuid.uuid4())
         now = _now()
         with self.lock, self.db:
-            self.db.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)", (conversation_id, title, now, now))
+            self.db.execute("INSERT INTO conversations(id,title,subject_id,mode,topic_ids,focus_topic_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (conversation_id, title, subject_id, mode, json.dumps(topic_ids or []), focus_topic_id, now, now))
         return self.get(conversation_id)
 
-    def update(self, conversation_id, *, title=None, draft=None, draft_version=None):
+    def update(self, conversation_id, *, title=None, draft=None, draft_version=None, subject_id=_UNSET, mode=None, topic_ids=None, focus_topic_id=_UNSET):
         updates, values = [], []
         if title is not None:
             updates.append("title=?")
@@ -89,6 +110,18 @@ class ConversationStore:
         if draft is not None:
             updates.extend(["draft=?", "draft_version=draft_version+1"])
             values.append(draft)
+        if subject_id is not _UNSET:
+            updates.append("subject_id=?")
+            values.append(subject_id)
+        if mode is not None:
+            updates.append("mode=?")
+            values.append(mode)
+        if topic_ids is not None:
+            updates.append("topic_ids=?")
+            values.append(json.dumps(topic_ids))
+        if focus_topic_id is not _UNSET:
+            updates.append("focus_topic_id=?")
+            values.append(focus_topic_id)
         if not updates:
             return self.get(conversation_id)
         updates.append("updated_at=?")
@@ -162,7 +195,7 @@ class ConversationStore:
             detail = self.get(conversation_id)
             return [message for message in detail["messages"] if message["request_id"] == request_id] if detail else []
 
-    def start_turn(self, conversation_id, turn_id, content, request_id=None, on_start=None):
+    def start_turn(self, conversation_id, turn_id, content, request_id=None, on_start=None, turn_context=None):
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone() is None:
                 raise LookupError("Conversation not found")
@@ -170,8 +203,8 @@ class ConversationStore:
                 return False
             for role, text in (("user", content), ("assistant", "")):
                 self.db.execute(
-                    "INSERT INTO messages(id,conversation_id,role,content,status,created_at,request_id) VALUES(?,?,?,?,?,?,?)",
-                    (f"{turn_id}-{role}", conversation_id, role, text, "streaming", _now(), request_id),
+                    "INSERT INTO messages(id,conversation_id,role,content,status,created_at,request_id,turn_context) VALUES(?,?,?,?,?,?,?,?)",
+                    (f"{turn_id}-{role}", conversation_id, role, text, "streaming", _now(), request_id, json.dumps(turn_context) if role == "user" and turn_context is not None else None),
                 )
             if on_start is not None:
                 on_start()
@@ -180,18 +213,35 @@ class ConversationStore:
 
     def finish_turn(self, conversation_id, turn_id, content, status, metrics=None, on_complete=None):
         with self.lock, self.db:
-            result = on_complete(f'{turn_id}-user') if status == 'complete' and on_complete is not None else None
-            if result is not None:
-                content = result['rendered']
             self.db.execute("UPDATE messages SET status=? WHERE id=?", (status, f"{turn_id}-user"))
             self.db.execute(
                 "UPDATE messages SET content=?, status=?, metrics=? WHERE id=?",
                 (content, status, json.dumps(metrics) if metrics is not None else None, f"{turn_id}-assistant"),
             )
+            result = on_complete(f'{turn_id}-user') if on_complete is not None else None
+            if result is not None:
+                content = result['rendered']
+                self.db.execute("UPDATE messages SET content=? WHERE id=?", (content, f"{turn_id}-assistant"))
             # If the conversation was deleted mid-generation, updates are no-ops;
             # an in-flight reply must never resurrect deleted content.
             self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (_now(), conversation_id))
             return result
+
+    def failed_turn_context(self, conversation_id, user_message_id):
+        with self.lock:
+            user = self.db.execute(
+                "SELECT turn_context,status,content FROM messages WHERE id=? AND conversation_id=? AND role='user'",
+                (user_message_id, conversation_id),
+            ).fetchone()
+            assistant = self.db.execute(
+                "SELECT role,status FROM messages WHERE conversation_id=? AND rowid=(SELECT MIN(rowid) FROM messages WHERE conversation_id=? AND rowid>(SELECT rowid FROM messages WHERE id=? AND conversation_id=?))",
+                (conversation_id, conversation_id, user_message_id, conversation_id),
+            ).fetchone()
+            if user is None or assistant is None or assistant['role'] != 'assistant' or user['status'] not in ('failed', 'cancelled') or assistant['status'] not in ('failed', 'cancelled'):
+                raise ValueError('Only a failed or cancelled turn can be retried')
+            if user['turn_context'] is None:
+                return None
+            return {'context': json.loads(user['turn_context']), 'content': user['content']}
 
     def close(self):
         with self.lock:

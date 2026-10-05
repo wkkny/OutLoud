@@ -1,14 +1,19 @@
 import { z } from 'zod'
 
 import { HTTP_URL } from './backend-url'
+export const workspaceSchema = z.object({ mode: z.enum(['study', 'chat']), topic_ids: z.array(z.string()), focus_topic_id: z.string().nullable() })
+export type WorkspaceContext = z.infer<typeof workspaceSchema>
+const turnContextSchema = z.object({ mode: z.enum(['study', 'chat']), topic_ids: z.array(z.string()).nullable(), focus_topic_id: z.string().nullable(), question: z.string(), action: z.string(), assisted: z.boolean() })
 export const messageSchema = z.object({
   id: z.string(), role: z.enum(['user', 'assistant']), content: z.string(),
   status: z.enum(['streaming', 'complete', 'failed', 'cancelled']),
   metrics: z.record(z.string(), z.number()).nullable(), created_at: z.string(),
   request_id: z.string().nullable().optional(),
+  turn_context: turnContextSchema.nullable().optional(),
 })
 const conversationSchema = z.object({
   id: z.string(), title: z.string(), draft: z.string(), draft_version: z.number().int().nonnegative(),
+  subject_id: z.string().nullable(), ...workspaceSchema.shape,
   created_at: z.string(), updated_at: z.string(),
 })
 const detailSchema = conversationSchema.extend({ messages: z.array(messageSchema) })
@@ -141,9 +146,9 @@ export class ConversationLibrary {
     })
   }
   select(id: string) { this.publish({ selectedId: id }); void this.load(id) }
-  async create(): Promise<string | null> {
+  async create(subjectId: string | null = null, topicIds: string[] = [], focusTopicId: string | null = null): Promise<string | null> {
     try {
-      const detail = detailSchema.parse(await request('/conversations', json('POST', {})))
+      const detail = detailSchema.parse(await request('/conversations', json('POST', { subject_id: subjectId, topic_ids: topicIds, focus_topic_id: focusTopicId })))
       // Invalidate list requests started before this creation; their snapshots
       // cannot name this conversation and must not undo this tab's selection.
       this.refreshSequence++
@@ -151,6 +156,13 @@ export class ConversationLibrary {
       this.accept(detail)
       return detail.id
     } catch (failure) { this.fail(failure); return null }
+  }
+  async updateWorkspace(id: string, update: { subject_id?: string | null; mode?: 'study' | 'chat'; topic_ids?: string[]; focus_topic_id?: string | null }): Promise<boolean> {
+    try {
+      const detail = detailSchema.parse(await request(pathFor(id), json('PATCH', update)))
+      this.accept(detail)
+      return true
+    } catch (failure) { this.fail(failure); return false }
   }
   async rename(id: string, title: string): Promise<MutationResult> {
     if (!title.trim()) return { ok: false, error: 'A conversation title cannot be empty.' }

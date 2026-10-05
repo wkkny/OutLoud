@@ -1,12 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
-import { backendFixture, FakeSocket, initialState } from '@/test/backend-fixture'
+import { backendFixture, FakeSocket, initialState, makeSubject } from '@/test/backend-fixture'
 
 let backend: ReturnType<typeof backendFixture>
 beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); localStorage.clear(); Reflect.deleteProperty(window, 'outloudDesktop'); backend = backendFixture() })
 afterEach(() => { Reflect.deleteProperty(window, 'outloudDesktop') })
-it('shows the app name only in the sidebar and the selected conversation title in the main area', async () => {
+it('keeps the conversation name in the sidebar and shows a quiet subject breadcrumb in the workspace', async () => {
   backend.conversations.clear()
   render(<App />)
   act(() => backend.socket().ready())
@@ -14,7 +14,9 @@ it('shows the app name only in the sidebar and the selected conversation title i
   expect(screen.getAllByText('OutLoud')).toHaveLength(1)
   expect(within(screen.getByRole('main')).queryByText('OutLoud')).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
-  await waitFor(() => expect(within(screen.getByRole('main')).getByText('New conversation')).toBeVisible())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Select New conversation' })).toBeVisible())
+  expect(within(screen.getByRole('main')).getByText('Unassigned')).toBeVisible()
+  expect(within(screen.getByRole('main')).queryByText('New conversation')).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Rename conversation' })).toBeEnabled()
   expect(screen.getByRole('button', { name: 'Delete conversation' })).toBeEnabled()
 })
@@ -128,6 +130,83 @@ it('lets the user compose before a conversation exists and creates one when send
     conversation_id: expect.any(String),
     messages: [{ role: 'user', content: 'Start a conversation' }],
   })
+})
+
+it('uses subject-backed topics, persistent Materials, and a saved sidebar mode switch', async () => {
+  const subject = makeSubject()
+  backend.subjects.push(subject)
+  const conversation = backend.conversations.get('chat-1')!
+  Object.assign(conversation, { subject_id: subject.id, topic_ids: [subject.topics[0]!.id], focus_topic_id: subject.topics[0]!.id })
+  const view = render(<App />)
+  act(() => backend.socket().ready())
+  fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
+  expect(await screen.findByRole('complementary', { name: 'Materials' })).toBeVisible()
+  expect(within(screen.getByRole('complementary', { name: 'Materials' })).getByText('Database Systems')).toBeVisible()
+  expect(screen.getByRole('main').querySelector('.workspace-breadcrumb')).toHaveTextContent(/Database Systems.*Normalization/)
+  expect(screen.getByRole('button', { name: /^Chat$/ })).toHaveAttribute('aria-pressed', 'true')
+  fireEvent.click(screen.getByRole('button', { name: /^Study$/ }))
+  await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'study')).toBe(true))
+  expect(screen.getByRole('button', { name: /^Study$/ })).toHaveAttribute('aria-pressed', 'true')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reference text' }), { target: { value: 'Reviewed 3NF reference.' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Approve reference' }))
+  await screen.findByText('Approved reference')
+  expect(backend.requests.some(request => request.path === `/study/subjects/${subject.id}/references` && request.method === 'POST')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: /^Chat$/ }))
+  await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'chat')).toBe(true))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Help me understand this topic.' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await screen.findByText('Local reply')
+  expect(backend.requests.find(request => request.path === '/chat')?.body).toMatchObject({ mode: 'chat', topic_ids: [subject.topics[0]!.id], focus_topic_id: subject.topics[0]!.id })
+  expect(screen.queryByRole('button', { name: 'Mark reply as study guidance for Normalization' })).not.toBeInTheDocument()
+  expect(await screen.findByText('Counts as Study guidance for Normalization')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: 'Exclude as guidance' }))
+  expect(await screen.findByText('Not counted as Study guidance')).toBeVisible()
+  view.unmount()
+  render(<App />)
+  act(() => backend.socket().ready())
+  fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
+  expect(await screen.findByText('Not counted as Study guidance')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: 'Count as guidance' }))
+  await waitFor(() => expect(backend.requests.some(request => request.path === `/study/conversations/chat-1/guidance` && request.method === 'POST')).toBe(true))
+})
+
+it('lets the learner save a requested tutor reply as the active Study question', async () => {
+  const subject = makeSubject()
+  backend.subjects.push(subject)
+  const conversation = backend.conversations.get('chat-1')!
+  const topic = subject.topics[0]!
+  Object.assign(conversation, { subject_id: subject.id, mode: 'study', topic_ids: [topic.id], focus_topic_id: topic.id })
+  conversation.messages = [
+    { id: 'question-user', role: 'user', content: 'Give me a question.', status: 'complete', metrics: null, created_at: '2026-01-01T00:00:00Z', turn_context: { mode: 'study', topic_ids: [topic.id], focus_topic_id: topic.id, question: '', action: 'chat', assisted: false } },
+    { id: 'question-assistant', role: 'assistant', content: 'Explain normalization.', status: 'complete', metrics: null, created_at: '2026-01-01T00:00:01Z' },
+  ]
+  render(<App />)
+  act(() => backend.socket().ready())
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Move First chat to subject' })).toHaveValue(subject.id))
+  fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
+  await screen.findByText('Explain normalization.')
+  fireEvent.click(await screen.findByRole('button', { name: 'Use reply as Study question' }))
+  const question = screen.getByRole('textbox', { name: 'Save this reply as the active Study question' })
+  expect(question).toHaveValue('Explain normalization.')
+  fireEvent.change(question, { target: { value: 'Explain first, second, and third normal forms.' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+  await waitFor(() => expect(backend.requests.some(request => request.path === '/study/conversations/chat-1/question' && request.method === 'POST' && request.body.question === 'Explain first, second, and third normal forms.')).toBe(true))
+})
+
+it('filters the flat sidebar and moves a conversation without changing its history', async () => {
+  backend.subjects.push(makeSubject())
+  render(<App />)
+  act(() => backend.socket().ready())
+  fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
+  const filter = screen.getByRole('combobox', { name: 'Filter conversations by subject' })
+  fireEvent.change(filter, { target: { value: 'subject-1' } })
+  expect(screen.queryByRole('button', { name: 'Select First chat' })).not.toBeInTheDocument()
+  fireEvent.change(filter, { target: { value: 'all' } })
+  expect(screen.getByRole('button', { name: 'Select First chat' })).toBeVisible()
+  fireEvent.change(screen.getByRole('combobox', { name: 'Move First chat to subject' }), { target: { value: 'subject-1' } })
+  await waitFor(() => expect(backend.conversations.get('chat-1')?.subject_id).toBe('subject-1'))
+  expect(backend.conversations.get('chat-1')?.messages).toEqual([])
+  expect(filter).toHaveValue('all')
 })
 
 it('recovers the first-chat draft and its unsaved warning after a reload', async () => {
