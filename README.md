@@ -1,262 +1,284 @@
 # OutLoud
 
-A local, voice-first chat app with a browser UI and an Electron development app
-targeting macOS, Windows, and Linux. Python records the microphone and
-transcribes with Whisper; the backend saves the transcript to the conversation's
-editable draft. Transcripts never auto-send. Review your text, then send it to local
-Gemma `gemma3:4b` through Ollama for a streamed reply.
+OutLoud is a local, voice-first chat and study app. It has a browser UI and an
+Electron development app. A Python backend records audio from the computer's
+microphone, transcribes it with Whisper, and saves the transcript into the
+selected conversation's editable draft. **A transcript is never sent
+automatically:** review it, then choose Send to get a streamed reply from the
+local Gemma model through Ollama.
 
-## Prerequisites
+The app runs its servers on loopback (`127.0.0.1`). It is designed for one
+computer, not as a hosted or network-accessible service. The browser and desktop
+apps use separate local data stores.
 
-- macOS and Python 3.11 (pinned in `.python-version` and `mise.toml`).
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) for Python dependencies.
-- [Bun](https://bun.sh/docs/installation) 1.4.2 for JavaScript dependencies and scripts.
-- Node.js 22.12+ in the 22.x series, or Node.js 24, for the frontend tooling.
-- FFmpeg on your PATH: `brew install ffmpeg` if you use Homebrew.
+## Quick start
 
-If you use mise, run `mise install` to install the pinned Python version.
+### 1. Install prerequisites
 
-## Setup and development
+- **Python 3.11**. The repository pins it in `.python-version` and `mise.toml`.
+  If you use [mise](https://mise.jdx.dev/), run `mise install` from the repo.
+- **uv** for Python environment and dependency management:
+  [install uv](https://docs.astral.sh/uv/getting-started/installation/).
+- **Bun 1.4.2** for JavaScript dependencies and workspace commands:
+  [install Bun](https://bun.sh/docs/installation).
+- **Node.js 22.12+ in the 22.x series, or Node.js 24** for frontend tooling.
+- **FFmpeg** on `PATH` for audio processing. With Homebrew on macOS:
+  `brew install ffmpeg`.
+- **PortAudio** on Linux for microphone capture. On Debian or Ubuntu, install
+  `libportaudio2` with your system package manager.
 
-From the repository root:
+The Electron development app also needs a working graphical desktop. On
+macOS, allow microphone access for the development app when prompted. On Linux,
+confirm the selected audio input is available to PortAudio. Python, FFmpeg,
+Whisper models, and Ollama are separate from Electron; this repo does not bundle
+them into an installer.
+
+### 2. Install project dependencies
+
+Run from the repository root:
 
 ```bash
 bun run setup
+```
+
+This installs JavaScript packages from `bun.lock` and Python packages from
+`uv.lock`. It creates the local `.venv` used by the backend. Keep `bun.lock` and
+`uv.lock` committed versions in place; setup uses frozen/locked installs.
+
+### 3. Start the browser app
+
+```bash
 bun run dev
 ```
 
-Setup installs both dependency sets from their lockfiles. Turborepo starts the
-backend and Vite together, with both logs in the terminal:
+Open **http://127.0.0.1:5173**. The command starts both services:
 
-- UI: **http://127.0.0.1:5173**
-- Backend: **http://127.0.0.1:8765**
-- API docs: **http://127.0.0.1:8765/docs**
+- Web UI: `http://127.0.0.1:5173`
+- Python backend: `http://127.0.0.1:8765`
+- Interactive backend API docs: `http://127.0.0.1:8765/docs`
 
-Press **Ctrl+C** to stop both servers. A failed development task stops the other
-server too. Ports are fixed; stop existing instances before starting development.
-Vite reloads frontend changes. Restart `bun run dev` after changing Python code.
+Press **Ctrl+C** in the terminal to stop both. The ports are fixed; stop any
+existing process using 5173 or 8765 before starting. Vite reloads web changes.
+Restart the command after changing Python code.
 
-Recording uses the microphone on the Mac running Python, not the browser's
-microphone. Allow microphone access for the terminal or application launching the
-backend when macOS asks. Whisper downloads the `base` model on the first
-transcription; later transcriptions use the cached local model.
+On the first recording, Whisper downloads its `base` model and caches it outside
+the repository. You do not need to download a model manually. Recording uses the
+microphone on the machine running Python, not the browser's microphone. On
+macOS, grant microphone access to the terminal or app that launched the backend.
 
-Create a conversation with **New chat**, or select a saved one in the sidebar.
-Click **Start recording** once to begin and **Stop recording** once to finish.
-Recording stays bound to the conversation selected when it started, even if you
-switch chats. Other tabs can connect and chat, but cannot take over the microphone.
-Closing the initiating tab safely stops its recording.
+### 4. Enable chat (optional)
 
-Conversations, titles, messages, and drafts are stored locally in SQLite. Each tab
-remembers its selection after reload. Rename or delete a chat using its controls.
-Gemma suggests a title from the first sent message after replying; a title you set
-yourself is kept.
-Draft edits are saved automatically. If tabs make conflicting edits, the composer
-keeps your unsaved text and asks you to review both drafts instead of overwriting
-someone else's work.
-
-Text composed before the first chat exists and pending sends are kept in this tab
-across reloads. A recovered send keeps its original request ID for Retry; saved
-history confirms accepted sends without sending them again. Newer composer edits
-are preserved, and interrupted sends are never retried automatically.
-
-Browser Fn/Globe capture, hold-to-record, and double-tap controls are removed.
-Electron-owned shortcuts are a separate future integration. The
-[Electron development app](apps/desktop/README.md) currently uses recording buttons.
-
-## Desktop development
-
-Run `bun run setup`, then `bun run dev:desktop` to open Electron with the existing
-chat UI. Electron manages Python; closing the window stops recording and drains
-transcription, with a loss warning before an explicit Force quit. There is no
-tray/background mode. Desktop saved data lives in a separate per-user directory.
-
-The desktop UI uses port **5174**, and its backend uses **8765**. Another backend
-on that port must be stopped first; Electron never attaches to it. Python,
-FFmpeg, and Ollama are still separate prerequisites, not bundled installers.
-See [desktop launch, lifecycle, data, and platform limitations](apps/desktop/README.md).
-
-## Study mode
-
-Open **Study** to create a subject, add or import a syllabus, choose an exam type,
-and review reference material. Explain a topic by typing or dictating, then answer
-follow-up questions and track topic understanding, evidence, and revision priorities
-across conversations. PDF/image extractions require review before use. Unsupported
-assessments stay provisional. See [Study setup, uploads, progress, and recovery](docs/study-mode.md).
-
-## Connection recovery
-
-Completed transcripts are appended to their originating saved draft before browser
-delivery. A durable recording marker prevents duplicate appends during replay,
-even if you edited or cleared the draft. Results remain available until acknowledged.
-Initial connection failures and dropped sessions use bounded retry/backoff. After
-retries are exhausted, the UI offers **Reconnect**. Your selection and unsaved
-recovery text remain in this tab while the backend is unavailable.
-
-The UI sends application heartbeats every 15 seconds and expects a matching reply
-within 10 seconds. A missing reply closes the session and starts safe-stop checks.
-The backend expires a client's lease after 90 seconds without a heartbeat and
-queues a stop if that client owns capture, even if its WebSocket stays open. The longer
-lease tolerates common background-tab timer throttling; a longer browser/OS
-suspension can still require manual reconnect.
-
-Delivery results and acknowledgement markers are stored in
-`recordings/delivery.sqlite3`. Unacknowledged results survive backend restart and
-replay in small batches. Conversations and drafts are stored separately in
-`recordings/conversations.sqlite3`; set `OUTLOUD_CONVERSATIONS_DB` to override that
-path. Saved drafts and chat history survive page reloads and backend restarts.
-
-## Transcription capacity
-
-OutLoud allows **3 outstanding transcriptions** by default, counting the active
-job, queued jobs, and the current recording. A slot is reserved before microphone
-startup. When capacity is full, new recordings are refused without closing the
-client session; **Stop recording** still works. The UI reports when capacity is full. Slots reopen after transcription succeeds or fails, or after an
-empty/failed recording releases its reservation.
-
-Configure a positive limit when launching the backend or the combined dev task:
+Recording and transcription work without Ollama. To get assistant replies, install
+[Ollama](https://ollama.com/download), start its local service if the app has not
+already started it, and download the model:
 
 ```bash
-OUTLOUD_MAX_TRANSCRIPTIONS=5 bun run dev
-# Or: OUTLOUD_MAX_TRANSCRIPTIONS=5 uv run outloud
+ollama serve
+ollama pull gemma3:4b
 ```
 
-Already-accepted commands are rechecked by the recording worker before microphone
-startup; a rapid queued start may report a capacity rejection after HTTP 202.
+Keep `ollama serve` running in a separate terminal when needed. Then review text
+in the OutLoud composer and select **Send**. Missing Ollama or the model leaves
+recording and dictation available. More about chat limits and behavior is in
+[CHAT.md](CHAT.md).
 
-## Local Gemma chat
+## Use OutLoud
 
-Install/start Ollama and download the model:
+### Chat and voice dictation
+
+1. Select **New chat** or choose a saved conversation in the sidebar.
+2. Select **Start recording**, speak, then select **Stop recording**.
+3. Review or edit the transcript in the draft. It is saved automatically.
+4. Select **Send** (or press **Cmd/Ctrl+Enter**) to request a Gemma reply.
+
+Plain Enter adds a new line. The reply streams into the conversation. **Stop
+generation** keeps any partial reply and does not stop recording. New dictation
+can continue while a reply is generating; it stays in the composer for a later
+send.
+
+Only one recording can run at a time across connected tabs. A recording stays
+attached to the conversation selected when it began, even if you switch chats.
+Other tabs can view and chat but cannot take over the microphone. Closing the
+initiating tab safely stops its capture. When a connection drops, the app retries
+and offers **Reconnect** if needed. Unsaved draft text is kept for recovery.
+
+Conversations, messages, and drafts are stored on this computer. Tabs share the
+backend's saved conversation library, while each browser tab remembers its own
+selection and keeps its unsaved edits. Conflicting edits are surfaced for review
+instead of silently replacing one another.
+
+OutLoud suggests a title from the first sent message after the assistant replies.
+If you rename a conversation yourself, OutLoud keeps your title.
+
+### Study mode
+
+Select **Study** to make a subject, add topics or import a syllabus, choose an
+exam type, and study a topic. Explain your understanding in the composer, then
+send it for feedback and a follow-up question. The study dashboard tracks
+assessment evidence and revision priorities. Study mode uses the same local
+Ollama model as chat.
+
+You can add printed PDFs or clear PNG, JPEG, or WebP images as a syllabus or
+reference. Check the extracted text and approve it before it can guide an
+assessment. A file can be up to 8 MB; PDF imports use up to five selected pages.
+Handwriting recognition is not supported. Study feedback can be provisional or
+incorrect, so check it against your source material. See [Study mode details](docs/study-mode.md).
+
+## Run the desktop development app
+
+After `bun run setup`, run from the repository root:
 
 ```bash
-brew install ollama
-ollama serve                    # separate terminal, unless Ollama is already running
-ollama pull gemma3:4b           # another terminal
+bun run dev:desktop
 ```
 
-Press **Send** after reviewing the composer. **Stop generation** preserves partial
-text and does not stop recording. Chat uses a 4,096-token context and up to 1,024
-output tokens. Missing Ollama/model errors leave dictation available. One reply can
-run per conversation, with two across the app by default. At capacity, Send reports
-busy and keeps the draft; requests are not queued or retried automatically. Configure
-`OUTLOUD_MAX_CHAT_GENERATIONS` before startup, for example
-`OUTLOUD_MAX_CHAT_GENERATIONS=1 bun run dev` on a memory-constrained Mac.
-See [chat setup, behavior, and measurements](CHAT.md).
+Electron starts a dedicated UI on **http://127.0.0.1:5174** and manages its own
+Python backend on port **8765**. Stop another backend first; the desktop app
+never attaches to or kills a backend it did not start. Port 5174 must also be
+free. To stop, close the window or press Ctrl+C in the launching terminal.
+
+The desktop app uses its own per-user data directory, separate from browser data.
+Closing the window stops recording and waits for accepted transcription work to
+finish. There is no tray or background mode. Changes to React hot-reload; restart
+`bun run dev:desktop` after editing Python or Electron code. See
+[desktop launch, permissions, lifecycle, and data](apps/desktop/README.md).
+
+## Run one service at a time
+
+Run these commands from the repository root. For a working browser app, keep the
+web and backend services running in separate terminals:
+
+```bash
+bun run dev:web       # Web UI only, at 127.0.0.1:5173
+bun run dev:backend   # Python backend only, at 127.0.0.1:8765
+```
+
+Equivalent direct commands are:
+
+```bash
+cd apps/web && bun run dev
+uv run outloud
+# or: uv run python -m outloud
+```
+
+The backend permits the default web origin on port 5173. Changing the Vite port
+requires changing the backend's allowed-origin configuration as well. Run only
+one backend at a time.
 
 ## Commands
 
-Run these from the repository root:
+Run from the repository root unless noted:
 
-| Command | What it does |
+| Command | Purpose |
 | --- | --- |
-| `bun run setup` | Install Bun and uv dependencies using the committed lockfiles |
-| `bun run dev` | Start the backend and web UI together |
-| `bun run dev:desktop` | Build and launch Electron, its dedicated UI server, and managed Python |
-| `bun run dev:web` | Start only the web UI |
+| `bun run setup` | Install JavaScript and Python dependencies |
+| `bun run dev` | Start the browser UI and backend together |
+| `bun run dev:web` | Start only the browser UI |
 | `bun run dev:backend` | Start only the backend |
+| `bun run dev:desktop` | Build and launch the Electron development app |
 | `bun run test` | Run Python unittest and frontend Vitest suites |
 | `bun run build` | Type-check/build the web UI and Electron main/preload code |
 | `bun run lint` | Run frontend lint |
-| `bun run check` | Validate dependencies, then run tests, TypeScript/build, and frontend lint |
+| `bun run check` | Validate dependencies, tests, builds, and frontend lint |
 
-`check` first installs JavaScript dependencies with `--frozen-lockfile`, rejecting
-out-of-date lockfiles. It then runs independent tasks in parallel and reports
-failures with a nonzero exit code. Python dependency checks validate `uv.lock`
-against `pyproject.toml` and check installed-package compatibility.
-
-Turborepo caches successful web tests, lint, and build outputs locally in
-`.turbo/`. Development tasks, backend tests, and dependency checks are never
-cached. Remote caching is disabled. To rerun all checks without cache hits:
+Use `bun run test`, not Bun's native `bun test`; the frontend uses Vitest. Backend
+tests simulate audio and model responses, so tests do not need a microphone,
+Whisper model download, or running Ollama. Turborepo may reuse local successful
+web task results from `.turbo/`. Force those tasks to run again with:
 
 ```bash
 bun run check -- --force
 ```
 
-Use `bun run test`, not Bun's native `bun test`; frontend tests use Vitest.
-Automated backend tests use simulated audio and models, so they do not need
-microphone access or a Whisper download.
+Desktop-specific checks are documented in [apps/desktop/README.md](apps/desktop/README.md).
 
-The Python entry points still work independently:
+## Configuration
+
+No `.env` file is required for local development. Optional environment variables
+can be set on the command that starts the backend:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OUTLOUD_MAX_TRANSCRIPTIONS` | `3` | Maximum outstanding transcription jobs, including active and queued work |
+| `OUTLOUD_MAX_CHAT_GENERATIONS` | `2` | Maximum simultaneous Ollama generations across the app |
+| `OUTLOUD_CONVERSATIONS_DB` | `recordings/conversations.sqlite3` | Override the browser/development conversation database path |
+
+The limits must be positive integers. For example, reduce concurrent chat
+generation on a memory-limited computer:
 
 ```bash
-uv run outloud
-uv run python -m outloud
-uv run python -m outloud.metrics
+OUTLOUD_MAX_CHAT_GENERATIONS=1 bun run dev
 ```
 
-## Continuous integration
+For the desktop development app, its launcher manages backend startup and its
+own data location. Do not start a second backend alongside it.
 
-GitHub Actions runs [CI](.github/workflows/ci.yml) on every pull request targeting
-`main`, including documentation-only changes. It does not run on branch pushes
-or deploy the app.
+## Data and privacy
 
-- **Web (Linux):** Vitest tests, TypeScript checking and the Vite build, and oxlint.
-- **Backend (Linux, Windows, macOS):** the Python unittest suite, lockfile validation,
-  and installed-package compatibility checks. Python follows `.python-version`;
-  Bun follows `package.json`'s `packageManager` field.
-- **Desktop (Linux, Windows, macOS):** subprocess lifecycle tests, TypeScript build, and lint; no GUI/audio tests.
-- **CI:** succeeds only when web validation and every backend and desktop matrix job pass.
-  Failed, cancelled, or skipped validation jobs do not satisfy this check.
-
-CI uses the same `bun run check` command as local validation, filtered to the
-workspace for each job. The backend matrix keeps running after a platform fails
-so each platform reports its result. New commits cancel obsolete runs on the
-same PR. Native Fn/Globe event-tap tests run only on macOS; shared shortcut
-behavior is tested everywhere. Tests need neither physical microphone access
-nor model downloads.
-
-The aggregate **CI** check is the merge gate, so branch rules do not need to track
-individual matrix job names. If removing or renaming it, update the required
-status checks in GitHub's `Protect main` ruleset too.
-
-## Repository layout
-
-```text
-apps/web/             React, TypeScript, Vite, shadcn/ui, and bundled Geist
-apps/desktop/         Electron main/preload, managed-backend lifecycle, dev launcher
-src/outloud/          Python recording, transcription, HTTP/WebSocket backend
-tests/               Python tests
-tooling/backend/     Bun workspace scripts that invoke uv from the repo root
-pyproject.toml       Python package and dependencies
-uv.lock              Python dependency lockfile
-package.json         Bun workspaces and root commands
-bun.lock             One JavaScript lockfile for all workspaces
-turbo.json           Task orchestration and cache configuration
-```
-
-Bun owns JavaScript dependencies; uv owns Python dependencies. The backend
-workspace is just a command wrapper, not a second Python project. Its scripts
-change to the repository root so recordings and the Python environment stay in
-one place.
-
-The desktop app reuses `apps/web/` directly. There are no duplicate frontend or
-placeholder shared packages. Installers and global recording shortcuts are deferred.
-
-## Saved data and current limits
-
-Recordings are stored under the repository root:
+In a repository-root development run, recordings are saved under `recordings/`:
 
 ```text
 recordings/<timestamp>_<id>/
   audio.wav
-  transcript.txt     # when transcription succeeds
+  transcript.txt     # if transcription succeeds
   metrics.json
 ```
 
-Audio is retained when transcription fails. Recordings, dependencies, generated
-web output, and Turbo caches are excluded from Git. Whisper's model cache lives
-outside the repository.
+The browser/development backend stores conversation and study data in
+`recordings/conversations.sqlite3` and pending transcript delivery in
+`recordings/delivery.sqlite3`. `OUTLOUD_CONVERSATIONS_DB` changes the conversation
+database path. Desktop data is instead kept in the operating system's per-user
+application data directory; see the desktop README for exact paths.
 
-Chat messages, drafts, and transcript deduplication markers are stored locally in
-SQLite. Deleting a conversation removes its saved chat, draft, and pending delivery
-text; saved audio files remain under `recordings/`. Transcription capacity is bounded,
-and delivery uses bounded replay batches rather than an in-memory backlog. Disk usage is not capped or automatically pruned. Queued audio
-jobs are not automatically resumed after backend restart, although their files
-remain saved. Backend shutdown drains saved transcription jobs and can wait for
-Whisper; it has no deadline. Do not expose the loopback backend to a network.
+Audio remains on disk if transcription fails. Deleting a conversation removes
+its saved chat, draft, and pending transcript text, but does not delete recording
+files. Disk usage is not automatically capped or pruned. Whisper's model cache is
+outside the repository. The backend is loopback-only; do not expose it to a
+network. See [backend behavior and security](BACKEND.md).
 
-## More detail
+## Troubleshooting
 
-- [Web UI controls and connection behavior](apps/web/README.md)
-- [Backend API, ownership, readiness, and security](BACKEND.md)
-- [Latency and memory measurements](METRICS.md)
+- **The app says the backend is unavailable:** confirm both services started in
+  `bun run dev`, then open `http://127.0.0.1:8765/ready`. Stop old processes on
+  ports 5173 or 8765 and restart.
+- **Recording cannot start:** check OS microphone permission, confirm an input
+  device is connected, and make sure FFmpeg and (on Linux) PortAudio are
+  installed. Microphone capture happens in Python on this computer.
+- **Transcription fails on first use:** check internet access for the initial
+  Whisper model download, available disk space, and that FFmpeg is on `PATH`.
+  The saved audio file remains available under `recordings/`.
+- **Chat cannot connect or find Gemma:** start Ollama, then run
+  `ollama pull gemma3:4b`. Check `ollama list`. Chat is optional; dictation
+  should still work without it.
+- **The desktop app will not launch:** verify setup completed, ports 5174 and
+  8765 are free, and a graphical session is available. Electron downloads its
+  platform package during dependency installation if needed.
+- **A draft or transcript looks missing after a connection loss:** use
+  **Reconnect** and reopen the original conversation. Unacknowledged transcripts
+  are durably queued and replayed; do not manually paste a transcript twice.
+
+## Project layout
+
+```text
+apps/web/             React, TypeScript, and Vite browser UI
+apps/desktop/         Electron shell and managed-backend lifecycle
+src/outloud/          Python recording, transcription, chat, and API backend
+tests/                Python backend tests
+tooling/backend/      Bun workspace scripts that invoke uv from the repo root
+package.json          Root commands and Bun workspaces
+bun.lock              JavaScript dependency lockfile
+pyproject.toml        Python package and dependencies
+uv.lock               Python dependency lockfile
+```
+
+The desktop app reuses `apps/web/`; it does not have a separate frontend. Bun
+manages JavaScript dependencies, and uv manages Python dependencies.
+
+## Further reading
+
+- [Web UI controls and behavior](apps/web/README.md)
+- [Desktop setup and lifecycle](apps/desktop/README.md)
+- [Local Gemma chat](CHAT.md)
+- [Study mode](docs/study-mode.md)
+- [Backend API and recovery](BACKEND.md)
+- [Performance measurements](METRICS.md)
