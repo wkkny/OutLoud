@@ -27,6 +27,7 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/s
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { StudyArea } from '@/components/study-area'
 import { MaterialsCard } from '@/components/materials-card'
+import { ConversationDetailsCard } from '@/components/conversation-details-card'
 import { ConversationTopicControls } from '@/components/conversation-topic-controls'
 import { getStudySession, judgmentLabels, studyJson, type StudySession, type StudyAction } from '@/lib/study'
 import { listSubjects, type StudySubject } from '@/lib/study'
@@ -157,13 +158,14 @@ function ChatApp() {
     } catch { /* Keep the current guidance state if metadata cannot be saved. */ }
   }
 
-  return <TooltipProvider><SidebarProvider className="chat-app">
+  return <TooltipProvider><SidebarProvider className="chat-app dark">
     <AppSidebar library={library} list={list} selectedId={selectedId} subjects={subjects} connected={connected} loading={conversations.loading} creating={creating} onStudy={() => setStudyOpen(true)} onChat={() => setStudyOpen(false)} onMode={mode => { if (selectedId) void library.updateWorkspace(selectedId, { mode }) }} onCreate={(subjectId, subject) => { setStudyOpen(false); void createChat(subjectId, subject) }} />
     <SidebarInset className="chat-main">
       <header className="chat-topbar">
         <div className="chat-heading flex min-w-0 items-center gap-3">
           <SidebarTrigger className="chat-sidebar-toggle" />
-          {selected && !studyOpen && <><Separator orientation="vertical" className="h-5" /><div className="workspace-breadcrumb">{selectedSubject?.name ?? 'Unassigned'}{selected.focus_topic_id && <> <span>/</span> {selectedSubject?.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</div></>}
+          <Separator orientation="vertical" className="h-5" />
+          <div className="workspace-breadcrumb"><strong>OutLoud</strong><span>/</span>{studyOpen ? 'Study dashboard' : selected?.title ?? 'New conversation'}{selectedSubject && <> <span>/</span> {selectedSubject.name}{selected?.focus_topic_id && <> <span>/</span> {selectedSubject.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</>}</div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {studyOpen && recording && <Button variant="destructive" size="sm" onClick={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')}>Stop recording</Button>}
@@ -250,7 +252,7 @@ function ChatApp() {
           {recording && dictation.snapshot?.conversation_id !== selectedId && <p role="status" className="capacity-note">Recording stays bound to its original conversation; switching does not move dictated text.</p>}
         </div>
         </div>
-        <MaterialsCard key={`${selectedSubject?.id ?? 'none'}:${selectedSubject?.uploads.find(upload => upload.role === 'reference')?.text ?? ''}`} subject={selectedSubject} onOpenStudy={() => setStudyOpen(true)} onSubjectsChanged={setSubjects} />
+        {selectedSubject ? <MaterialsCard key={`${selectedSubject.id}:${selectedSubject.uploads.find(upload => upload.role === 'reference')?.text ?? ''}`} subject={selectedSubject} onOpenStudy={() => setStudyOpen(true)} onSubjectsChanged={setSubjects} /> : <ConversationDetailsCard conversation={selected} connected={connected} />}
       </div>}
     </SidebarInset>
   </SidebarProvider></TooltipProvider>
