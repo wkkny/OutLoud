@@ -20,6 +20,7 @@ export function AppSidebar({ library, list, selectedId, subjects, connected, loa
   const selected = list.find(item => item.id === selectedId)
   const visible = useMemo(() => list.filter(item => (filter === 'all' || item.subject_id === filter) && `${item.title} ${filter === 'all' ? subjects.find(subject => subject.id === item.subject_id)?.name ?? 'Unassigned' : ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [list, filter, search, subjects])
   const activeSubject = filter === 'all' ? null : subjects.find(subject => subject.id === filter) ?? null
+  const openStudyDashboard = () => { onStudy(); setOpenMobile(false) }
   const selectConversation = (item: Conversation) => { onChat(); library.select(item.id); setOpenMobile(false) }
   const create = () => { onChat(); onCreate(activeSubject?.id ?? null, activeSubject ?? undefined); setOpenMobile(false) }
   return <Sidebar>
@@ -56,7 +57,7 @@ export function AppSidebar({ library, list, selectedId, subjects, connected, loa
       <div className="sidebar-mode-switch" role="group" aria-label="Conversation mode">
         {(['study', 'chat'] as const).map(mode => <Button key={mode} variant={selected?.mode === mode ? 'secondary' : 'ghost'} aria-pressed={selected?.mode === mode} disabled={!selected || !connected} onClick={() => onMode(mode)}>{mode === 'study' ? 'Study' : 'Chat'}</Button>)}
       </div>
-      <div className="sidebar-footer-actions"><Button variant="ghost" size="sm" className="justify-start" onClick={() => { onStudy(); setOpenMobile(false) }}>Study dashboard</Button><Button variant="ghost" size="icon-sm" aria-label="New subject" title="New subject" onClick={() => { onStudy(); setOpenMobile(false) }}><Plus /></Button></div>
+      <div className="sidebar-footer-actions"><Button variant="ghost" size="sm" className="justify-start" onClick={openStudyDashboard}>Study dashboard</Button><Button variant="ghost" size="icon-sm" aria-label="New subject" title="New subject" onClick={openStudyDashboard}><Plus /></Button></div>
     </SidebarFooter>
   </Sidebar>
 }
