@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Toaster, createToastManager } from '@/components/ui/toast'
-import { ArrowUp, ChevronDown, RefreshCw, Square } from 'lucide-react'
+import { ArrowUp, ChevronDown, Square } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from '@/components/ui/input-group'
@@ -15,7 +15,6 @@ import { useChat } from '@/hooks/use-chat'
 import { readUnscopedDraft, writeUnscopedDraft, type PendingSend } from '@/lib/chat-recovery'
 import { AppSidebar } from '@/components/app-sidebar'
 import { ConversationActions } from '@/components/conversation-actions'
-import { Badge } from '@/components/ui/badge'
 import { request, type WorkspaceContext } from '@/lib/conversations'
 import { Card, CardContent } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -26,7 +25,6 @@ import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { StudyArea } from '@/components/study-area'
-import { MaterialsCard } from '@/components/materials-card'
 import { ConversationTopicControls } from '@/components/conversation-topic-controls'
 import { getStudySession, judgmentLabels, studyJson, type StudySession, type StudyAction } from '@/lib/study'
 import { listSubjects, type StudySubject } from '@/lib/study'
@@ -157,18 +155,17 @@ function ChatApp() {
     } catch { /* Keep the current guidance state if metadata cannot be saved. */ }
   }
 
-  return <TooltipProvider><SidebarProvider className="chat-app">
+  return <TooltipProvider><SidebarProvider className="chat-app dark">
     <AppSidebar library={library} list={list} selectedId={selectedId} subjects={subjects} connected={connected} loading={conversations.loading} creating={creating} onStudy={() => setStudyOpen(true)} onChat={() => setStudyOpen(false)} onMode={mode => { if (selectedId) void library.updateWorkspace(selectedId, { mode }) }} onCreate={(subjectId, subject) => { setStudyOpen(false); void createChat(subjectId, subject) }} />
     <SidebarInset className="chat-main">
       <header className="chat-topbar">
         <div className="chat-heading flex min-w-0 items-center gap-3">
           <SidebarTrigger className="chat-sidebar-toggle" />
-          {selected && !studyOpen && <><Separator orientation="vertical" className="h-5" /><div className="workspace-breadcrumb">{selectedSubject?.name ?? 'Unassigned'}{selected.focus_topic_id && <> <span>/</span> {selectedSubject?.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</div></>}
+          <Separator orientation="vertical" className="h-5" />
+          <nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><strong>OutLoud</strong><span>/</span>{studyOpen ? 'Study dashboard' : selected?.title ?? 'New conversation'}{!studyOpen && selectedSubject && <> <span>/</span> {selectedSubject.name}{selected?.focus_topic_id && <> <span>/</span> {selectedSubject.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</>}</nav>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {studyOpen && recording && <Button variant="destructive" size="sm" onClick={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')}>Stop recording</Button>}
-          <Badge variant={connected ? 'secondary' : 'outline'} role="status" className="connection-status">{connected ? 'Connected · local' : dictation.connection === 'exhausted' ? 'Connection retries exhausted' : dictation.connection === 'retrying' ? 'Reconnecting with backoff…' : 'Connecting…'}</Badge>
-          {!connected && <Button variant="ghost" size="icon-sm" aria-label="Reconnect" disabled={dictation.safety === 'stopping'} onClick={dictation.reconnect}><RefreshCw /></Button>}
           {selected && !studyOpen && <ConversationActions key={selected.id} conversation={selected} library={library} enabled={connected} />}
         </div>
       </header>
@@ -250,7 +247,6 @@ function ChatApp() {
           {recording && dictation.snapshot?.conversation_id !== selectedId && <p role="status" className="capacity-note">Recording stays bound to its original conversation; switching does not move dictated text.</p>}
         </div>
         </div>
-        <MaterialsCard key={`${selectedSubject?.id ?? 'none'}:${selectedSubject?.uploads.find(upload => upload.role === 'reference')?.text ?? ''}`} subject={selectedSubject} onOpenStudy={() => setStudyOpen(true)} onSubjectsChanged={setSubjects} />
       </div>}
     </SidebarInset>
   </SidebarProvider></TooltipProvider>

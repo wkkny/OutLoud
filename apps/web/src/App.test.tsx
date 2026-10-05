@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { backendFixture, FakeSocket, initialState, makeSubject } from '@/test/backend-fixture'
@@ -6,17 +7,16 @@ import { backendFixture, FakeSocket, initialState, makeSubject } from '@/test/ba
 let backend: ReturnType<typeof backendFixture>
 beforeEach(() => { vi.useRealTimers(); sessionStorage.clear(); localStorage.clear(); Reflect.deleteProperty(window, 'outloudDesktop'); backend = backendFixture() })
 afterEach(() => { Reflect.deleteProperty(window, 'outloudDesktop') })
-it('keeps the conversation name in the sidebar and shows a quiet subject breadcrumb in the workspace', async () => {
+it('keeps the conversation name in the sidebar and shows the app breadcrumb in the workspace', async () => {
   backend.conversations.clear()
   render(<App />)
   act(() => backend.socket().ready())
   await screen.findByText('Your conversations will appear here.')
-  expect(screen.getAllByText('OutLoud')).toHaveLength(1)
-  expect(within(screen.getByRole('main')).queryByText('OutLoud')).not.toBeInTheDocument()
+  expect(screen.getAllByText('OutLoud')).toHaveLength(2)
+  expect(within(screen.getByRole('main')).getByRole('navigation', { name: 'Workspace breadcrumb' })).toHaveTextContent(/OutLoud\s*\/\s*New conversation/)
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Select New conversation' })).toBeVisible())
-  expect(within(screen.getByRole('main')).getByText('Unassigned')).toBeVisible()
-  expect(within(screen.getByRole('main')).queryByText('New conversation')).not.toBeInTheDocument()
+  expect(within(screen.getByRole('main')).getByRole('navigation', { name: 'Workspace breadcrumb' })).toHaveTextContent(/OutLoud\s*\/\s*New conversation/)
   expect(screen.getByRole('button', { name: 'Rename conversation' })).toBeEnabled()
   expect(screen.getByRole('button', { name: 'Delete conversation' })).toBeEnabled()
 })
@@ -36,7 +36,9 @@ it('keeps routine composer copy quiet but shows unsaved changes until the save c
   expect(screen.queryByText('Your draft is saved locally')).not.toBeInTheDocument()
   expect(screen.queryByText('Audio and conversations stay on this Mac')).not.toBeInTheDocument()
   expect(screen.queryByText('Whisper transcription · Gemma chat runs locally')).not.toBeInTheDocument()
-  expect(screen.getByText('Gemma 3:4b')).toBeVisible()
+  const modelLabels = screen.getAllByText('Gemma 3:4b')
+  expect(modelLabels).toHaveLength(1)
+  modelLabels.forEach(model => expect(model).toBeVisible())
   expect(screen.queryByText('· local')).not.toBeInTheDocument()
   expect(screen.queryByText('⌘ / Ctrl')).not.toBeInTheDocument()
   expect(screen.getByText('Enter')).toBeVisible()
@@ -132,7 +134,7 @@ it('lets the user compose before a conversation exists and creates one when send
   })
 })
 
-it('uses subject-backed topics, persistent Materials, and a saved sidebar mode switch', async () => {
+it('uses subject-backed topics and a saved sidebar mode switch without a side card', async () => {
   const subject = makeSubject()
   backend.subjects.push(subject)
   const conversation = backend.conversations.get('chat-1')!
@@ -140,17 +142,12 @@ it('uses subject-backed topics, persistent Materials, and a saved sidebar mode s
   const view = render(<App />)
   act(() => backend.socket().ready())
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
-  expect(await screen.findByRole('complementary', { name: 'Materials' })).toBeVisible()
-  expect(within(screen.getByRole('complementary', { name: 'Materials' })).getByText('Database Systems')).toBeVisible()
+  expect(screen.queryByRole('complementary', { name: 'Materials' })).not.toBeInTheDocument()
   expect(screen.getByRole('main').querySelector('.workspace-breadcrumb')).toHaveTextContent(/Database Systems.*Normalization/)
   expect(screen.getByRole('button', { name: /^Chat$/ })).toHaveAttribute('aria-pressed', 'true')
   fireEvent.click(screen.getByRole('button', { name: /^Study$/ }))
   await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'study')).toBe(true))
   expect(screen.getByRole('button', { name: /^Study$/ })).toHaveAttribute('aria-pressed', 'true')
-  fireEvent.change(screen.getByRole('textbox', { name: 'Reference text' }), { target: { value: 'Reviewed 3NF reference.' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Approve reference' }))
-  await screen.findByText('Approved reference')
-  expect(backend.requests.some(request => request.path === `/study/subjects/${subject.id}/references` && request.method === 'POST')).toBe(true)
   fireEvent.click(screen.getByRole('button', { name: /^Chat$/ }))
   await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'chat')).toBe(true))
   fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Help me understand this topic.' } })
@@ -194,19 +191,19 @@ it('lets the learner save a requested tutor reply as the active Study question',
 })
 
 it('filters the flat sidebar and moves a conversation without changing its history', async () => {
-  backend.subjects.push(makeSubject())
+  backend.subjects.push(makeSubject(), makeSubject('subject-2', 'Biology'))
   render(<App />)
   act(() => backend.socket().ready())
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
-  const filter = screen.getByRole('combobox', { name: 'Filter conversations by subject' })
-  fireEvent.change(filter, { target: { value: 'subject-1' } })
-  expect(screen.queryByRole('button', { name: 'Select First chat' })).not.toBeInTheDocument()
-  fireEvent.change(filter, { target: { value: 'all' } })
-  expect(screen.getByRole('button', { name: 'Select First chat' })).toBeVisible()
   fireEvent.change(screen.getByRole('combobox', { name: 'Move First chat to subject' }), { target: { value: 'subject-1' } })
   await waitFor(() => expect(backend.conversations.get('chat-1')?.subject_id).toBe('subject-1'))
+  const user = userEvent.setup()
+  const filter = screen.getByRole('combobox', { name: 'Filter conversations by subject' })
+  await user.click(filter)
+  await user.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+  expect(filter).toHaveTextContent('Biology')
+  expect(screen.queryByRole('button', { name: 'Select First chat' })).not.toBeInTheDocument()
   expect(backend.conversations.get('chat-1')?.messages).toEqual([])
-  expect(filter).toHaveValue('all')
 })
 
 it('recovers the first-chat draft and its unsaved warning after a reload', async () => {
@@ -603,7 +600,7 @@ it('shows app-wide microphone occupancy without rejecting the tab connection', a
   act(() => backend.socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, capture_owned: false, client_connected: true, recording: true, conversation_id: 'elsewhere' } }))
   expect(screen.getByText('Microphone occupied in another tab')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+  expect(screen.queryByText('Connected · local')).not.toBeInTheDocument()
 })
 
 it('sends only the latest user message with backend identity, displays the reply and clears the accepted draft', async () => {
@@ -639,7 +636,7 @@ it('backs off failed initial connections, exhausts a bounded retry budget and re
     expect(FakeSocket.instances).toHaveLength(count + 1)
   }
   act(() => backend.socket().onerror?.())
-  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.queryByText('Connection retries exhausted')).not.toBeInTheDocument()
   await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
   expect(FakeSocket.instances).toHaveLength(5)
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Offline edits')
@@ -665,7 +662,7 @@ it('reconnects after loss using the old client safety check even if another tab 
   act(() => backend.socket().ready())
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Retain this')
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+  expect(screen.queryByText('Connected · local')).not.toBeInTheDocument()
   vi.useRealTimers()
 })
 
@@ -797,18 +794,14 @@ it('allows deliberate cancellation of the displayed conversation only', async ()
   expect(backend.requests.filter((request) => request.path === '/chat/cancel')).toHaveLength(1)
 })
 
-it('bounds stalled initial handshakes and permits an explicit fresh retry after exhaustion', async () => {
+it('bounds stalled initial handshakes without showing connection indicators', async () => {
   vi.useFakeTimers()
   render(<App />)
   await act(async () => { await vi.advanceTimersByTimeAsync(32500) })
   expect(FakeSocket.instances).toHaveLength(5)
-  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.queryByText('Connection retries exhausted')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument()
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
-  fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-  expect(FakeSocket.instances).toHaveLength(6)
-  act(() => backend.socket().ready())
-  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
 })
 
 it('never reopens capture after loss until the old client releases it, and exhausts safety checks', async () => {
@@ -821,7 +814,7 @@ it('never reopens capture after loss until the old client releases it, and exhau
   act(() => backend.socket().close())
   await act(async () => { await vi.advanceTimersByTimeAsync(14000) })
   expect(screen.getByText('Recording stop is unconfirmed')).toBeInTheDocument()
-  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.queryByText('Connection retries exhausted')).not.toBeInTheDocument()
   expect(FakeSocket.instances).toHaveLength(1)
   expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
 })
@@ -1146,7 +1139,7 @@ it.each([false, true])('recovers a first-message draft after desktop closure, ma
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(managedDesktop ? 'First words before closing' : '')
 })
 
-it.each([false, true])('offers desktop restart guidance after connection retries are exhausted, managed desktop = %s', async (managedDesktop) => {
+it.each([false, true])('keeps exhausted connection retries out of the UI, managed desktop = %s', async (managedDesktop) => {
   if (managedDesktop) vi.stubGlobal('outloudDesktop', { managedBackend: true })
   await open()
   vi.useFakeTimers()
@@ -1155,9 +1148,6 @@ it.each([false, true])('offers desktop restart guidance after connection retries
     await act(async () => vi.advanceTimersByTimeAsync(delay))
   }
   await act(async () => backend.socket().onerror?.())
-  const notice = screen.getByRole('dialog', { name: "Can't connect to OutLoud" })
-  expect(notice).toHaveTextContent(managedDesktop
-    ? 'Your text is still here. Try reconnecting, or close and reopen OutLoud if it remains unavailable.'
-    : 'Your text is still here. Try reconnecting.')
-  expect(within(notice).getByRole('button', { name: 'Reconnect to OutLoud' })).toBeEnabled()
+  const notifications = screen.getByRole('region', { name: 'Notifications' })
+  expect(within(notifications).queryByRole('dialog')).not.toBeInTheDocument()
 })

@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useRef } from 'react'
 import { useToastManager } from '@/components/ui/toast'
 import type { ConversationLibrary } from '@/lib/conversations'
-import type { Connection, Safety } from '@/lib/dictation-session'
+import type { Connection } from '@/lib/dictation-session'
 
 // Only known, actionable explanations belong in a toast, not raw service errors.
 const chatDescriptions: Record<string, string> = {
@@ -34,8 +34,6 @@ function recordingDescription(error: string) {
 type Notice = Parameters<ReturnType<typeof useToastManager>['add']>[0]
 type NotificationsState = {
   connection: Connection
-  safety: Safety
-  reconnect: () => void
   selectedId: string | null
   chatError: string | null
   capacityFull: boolean | null
@@ -47,11 +45,10 @@ type NotificationsState = {
 }
 
 /** Each condition owns one toast until it resolves, even if the user dismisses it. */
-export function useNotifications({ connection, safety, reconnect, selectedId, chatError, capacityFull, draftError, library, libraryError, recordingError, recordingAttempt }: NotificationsState) {
+export function useNotifications({ connection, selectedId, chatError, capacityFull, draftError, library, libraryError, recordingError, recordingAttempt }: NotificationsState) {
   const managedBackend = window.outloudDesktop?.managedBackend === true
   const { add, close, update } = useToastManager()
   const notices = useRef(new Map<string, { id: string | null; dismissed: boolean; identity: string | null }>())
-  const outage = useRef(false)
   const hide = useEffectEvent((channel: string) => {
     const notice = notices.current.get(channel)
     if (notice?.id) {
@@ -81,9 +78,6 @@ export function useNotifications({ connection, safety, reconnect, selectedId, ch
       notice.id = id
       notices.current.set(channel, notice)
     }
-  })
-  const restored = useEffectEvent(() => {
-    add({ title: 'Connected again', type: 'success' })
   })
   const openMicrophoneSettings = useEffectEvent(async () => {
     try { await window.outloudDesktop?.openMicrophoneSettings() }
@@ -135,21 +129,4 @@ export function useNotifications({ connection, safety, reconnect, selectedId, ch
     sync(`chat:${selectedId}`, chatError ? { title: "Couldn't get a reply", description: chatDescription(chatError), type: 'error', timeout: 0 } : null, chatError)
   }, [chatError, selectedId])
 
-  useEffect(() => {
-    if (connection === 'retrying' || connection === 'exhausted') outage.current = true
-    if (connection === 'connected') {
-      sync('connection', null)
-      if (outage.current) restored()
-      outage.current = false
-    } else if (outage.current) {
-      sync('connection', {
-        title: connection === 'exhausted' ? "Can't connect to OutLoud" : connection === 'retrying' ? 'Trying to reconnect' : 'Connecting to OutLoud',
-        description: managedBackend && connection === 'exhausted'
-          ? 'Your text is still here. Try reconnecting, or close and reopen OutLoud if it remains unavailable.'
-          : 'Your text is still here. Try reconnecting.',
-        type: 'warning', timeout: 0,
-        actionProps: { children: 'Reconnect', 'aria-label': 'Reconnect to OutLoud', disabled: safety === 'stopping', onClick: reconnect },
-      })
-    }
-  }, [connection, safety, reconnect, managedBackend])
 }
