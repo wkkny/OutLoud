@@ -26,8 +26,6 @@ import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { StudyArea } from '@/components/study-area'
-import { MaterialsCard } from '@/components/materials-card'
-import { ConversationDetailsCard } from '@/components/conversation-details-card'
 import { ConversationTopicControls } from '@/components/conversation-topic-controls'
 import { getStudySession, judgmentLabels, studyJson, type StudySession, type StudyAction } from '@/lib/study'
 import { listSubjects, type StudySubject } from '@/lib/study'
@@ -252,7 +250,6 @@ function ChatApp() {
           {recording && dictation.snapshot?.conversation_id !== selectedId && <p role="status" className="capacity-note">Recording stays bound to its original conversation; switching does not move dictated text.</p>}
         </div>
         </div>
-        {selectedSubject ? <MaterialsCard key={`${selectedSubject.id}:${selectedSubject.uploads.find(upload => upload.role === 'reference')?.text ?? ''}`} subject={selectedSubject} onOpenStudy={() => setStudyOpen(true)} onSubjectsChanged={setSubjects} /> : <ConversationDetailsCard conversation={selected} connected={connected} />}
       </div>}
     </SidebarInset>
   </SidebarProvider></TooltipProvider>

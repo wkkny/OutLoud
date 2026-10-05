@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { backendFixture, FakeSocket, initialState, makeSubject } from '@/test/backend-fixture'
@@ -37,7 +38,7 @@ it('keeps routine composer copy quiet but shows unsaved changes until the save c
   expect(screen.queryByText('Audio and conversations stay on this Mac')).not.toBeInTheDocument()
   expect(screen.queryByText('Whisper transcription · Gemma chat runs locally')).not.toBeInTheDocument()
   const modelLabels = screen.getAllByText('Gemma 3:4b')
-  expect(modelLabels).toHaveLength(2)
+  expect(modelLabels).toHaveLength(1)
   modelLabels.forEach(model => expect(model).toBeVisible())
   expect(screen.queryByText('· local')).not.toBeInTheDocument()
   expect(screen.queryByText('⌘ / Ctrl')).not.toBeInTheDocument()
@@ -134,7 +135,7 @@ it('lets the user compose before a conversation exists and creates one when send
   })
 })
 
-it('uses subject-backed topics, persistent Materials, and a saved sidebar mode switch', async () => {
+it('uses subject-backed topics and a saved sidebar mode switch without a side card', async () => {
   const subject = makeSubject()
   backend.subjects.push(subject)
   const conversation = backend.conversations.get('chat-1')!
@@ -142,17 +143,12 @@ it('uses subject-backed topics, persistent Materials, and a saved sidebar mode s
   const view = render(<App />)
   act(() => backend.socket().ready())
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
-  expect(await screen.findByRole('complementary', { name: 'Materials' })).toBeVisible()
-  expect(within(screen.getByRole('complementary', { name: 'Materials' })).getByText('Database Systems')).toBeVisible()
+  expect(screen.queryByRole('complementary', { name: 'Materials' })).not.toBeInTheDocument()
   expect(screen.getByRole('main').querySelector('.workspace-breadcrumb')).toHaveTextContent(/Database Systems.*Normalization/)
   expect(screen.getByRole('button', { name: /^Chat$/ })).toHaveAttribute('aria-pressed', 'true')
   fireEvent.click(screen.getByRole('button', { name: /^Study$/ }))
   await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'study')).toBe(true))
   expect(screen.getByRole('button', { name: /^Study$/ })).toHaveAttribute('aria-pressed', 'true')
-  fireEvent.change(screen.getByRole('textbox', { name: 'Reference text' }), { target: { value: 'Reviewed 3NF reference.' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Approve reference' }))
-  await screen.findByText('Approved reference')
-  expect(backend.requests.some(request => request.path === `/study/subjects/${subject.id}/references` && request.method === 'POST')).toBe(true)
   fireEvent.click(screen.getByRole('button', { name: /^Chat$/ }))
   await waitFor(() => expect(backend.requests.some(request => request.path === '/conversations/chat-1' && request.method === 'PATCH' && request.body.mode === 'chat')).toBe(true))
   fireEvent.change(screen.getByRole('textbox', { name: 'Your text' }), { target: { value: 'Help me understand this topic.' } })
@@ -201,14 +197,17 @@ it('filters the flat sidebar and moves a conversation without changing its histo
   act(() => backend.socket().ready())
   fireEvent.click(await screen.findByRole('button', { name: 'Select First chat' }))
   const filter = screen.getByRole('combobox', { name: 'Filter conversations by subject' })
-  fireEvent.change(filter, { target: { value: 'subject-1' } })
+  const user = userEvent.setup()
+  await user.click(filter)
+  await user.click(screen.getByRole('option', { name: 'Database Systems' }))
   expect(screen.queryByRole('button', { name: 'Select First chat' })).not.toBeInTheDocument()
-  fireEvent.change(filter, { target: { value: 'all' } })
+  await user.click(filter)
+  await user.click(screen.getByRole('option', { name: 'All subjects' }))
   expect(screen.getByRole('button', { name: 'Select First chat' })).toBeVisible()
   fireEvent.change(screen.getByRole('combobox', { name: 'Move First chat to subject' }), { target: { value: 'subject-1' } })
   await waitFor(() => expect(backend.conversations.get('chat-1')?.subject_id).toBe('subject-1'))
   expect(backend.conversations.get('chat-1')?.messages).toEqual([])
-  expect(filter).toHaveValue('all')
+  expect(filter).toHaveTextContent('All subjects')
 })
 
 it('recovers the first-chat draft and its unsaved warning after a reload', async () => {

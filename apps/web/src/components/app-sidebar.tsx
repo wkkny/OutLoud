@@ -3,6 +3,7 @@ import { AudioLines, MessageSquare, Plus, Search, SquarePen } from 'lucide-react
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarMenuSkeleton, useSidebar } from '@/components/ui/sidebar'
 import type { Conversation, ConversationLibrary } from '@/lib/conversations'
 import type { StudySubject } from '@/lib/study'
@@ -21,6 +22,7 @@ export function AppSidebar({ library, list, selectedId, subjects, connected, loa
   const visible = useMemo(() => list.filter(item => (filter === 'all' || item.subject_id === filter) && `${item.title} ${filter === 'all' ? subjects.find(subject => subject.id === item.subject_id)?.name ?? 'Unassigned' : ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [list, filter, search, subjects])
   const activeSubject = filter === 'all' ? null : subjects.find(subject => subject.id === filter) ?? null
   const openStudyDashboard = () => { onStudy(); setOpenMobile(false) }
+  const subjectOptions = [{ label: 'All subjects', value: 'all' }, ...subjects.map(subject => ({ label: subject.name, value: subject.id }))]
   const selectConversation = (item: Conversation) => { onChat(); library.select(item.id); setOpenMobile(false) }
   const create = () => { onChat(); onCreate(activeSubject?.id ?? null, activeSubject ?? undefined); setOpenMobile(false) }
   return <Sidebar>
@@ -33,10 +35,10 @@ export function AppSidebar({ library, list, selectedId, subjects, connected, loa
           <div className="sidebar-conversation-tools">
             <div className="sidebar-search-row"><label className="sidebar-search"><Search className="size-4" /><Input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search" aria-label="Search conversations" /></label><Button variant="ghost" size="icon-sm" aria-label="New chat" title="New chat" onClick={create} disabled={!connected || creating}><SquarePen /></Button></div>
             <label className="sr-only" htmlFor="conversation-subject-filter">Filter conversations by subject</label>
-            <select id="conversation-subject-filter" className="sidebar-subject-filter" aria-label="Filter conversations by subject" value={filter} onChange={event => setFilter(event.target.value)}>
-              <option value="all">All subjects</option>
-              {subjects.map(subject => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
-            </select>
+            <Select items={subjectOptions} value={filter} onValueChange={value => setFilter(typeof value === 'string' ? value : 'all')}>
+              <SelectTrigger id="conversation-subject-filter" className="sidebar-subject-select"><SelectValue /></SelectTrigger>
+              <SelectContent align="start"><SelectGroup>{subjectOptions.map(subject => <SelectItem key={subject.value} value={subject.value}>{subject.label}</SelectItem>)}</SelectGroup></SelectContent>
+            </Select>
           </div>
           <nav aria-label="Conversations"><SidebarMenu>
             {loading ? [0, 1, 2].map(item => <SidebarMenuItem key={item}><SidebarMenuSkeleton /></SidebarMenuItem>) : visible.map(item => <SidebarMenuItem key={item.id}>
