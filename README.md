@@ -49,6 +49,8 @@ Closing the initiating tab safely stops its recording.
 
 Conversations, titles, messages, and drafts are stored locally in SQLite. Each tab
 remembers its selection after reload. Rename or delete a chat using its controls.
+Gemma suggests a title from the first sent message after replying; a title you set
+yourself is kept.
 Draft edits are saved automatically. If tabs make conflicting edits, the composer
 keeps your unsaved text and asks you to review both drafts instead of overwriting
 someone else's work.

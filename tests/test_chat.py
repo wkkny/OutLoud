@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,9 +18,14 @@ class ChatTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.requests = []
+        self.title_requests = []
 
         async def ollama(request):
-            self.requests.append(json.loads(request.content))
+            payload = json.loads(request.content)
+            if not payload['stream']:
+                self.title_requests.append(payload)
+                return httpx2.Response(200, json={"message": {"content": "Greeting the assistant"}})
+            self.requests.append(payload)
             return httpx2.Response(200, content=(
                 '{"message":{"content":"Hello "},"done":false}\n'
                 '{"message":{"content":"there."},"done":false}\n'
@@ -44,6 +50,15 @@ class ChatTests(unittest.TestCase):
     def body(self, request_id="request-one"):
         return {"request_id": request_id, "conversation_id": self.conversation_id, "messages": [{"role": "user", "content": "Hello"}]}
 
+    def wait_for_title(self, expected):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            title = self.client.get(f"/conversations/{self.conversation_id}").json()["title"]
+            if title == expected:
+                return
+            time.sleep(0.01)
+        self.fail(f"Conversation title did not become {expected!r}; last value was {title!r}")
+
     def test_owner_can_stream_gemma_reply_with_bounded_context_and_metrics(self):
         with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
             response = self.client.post("/chat", headers=self.headers(socket), json=self.body())
@@ -54,7 +69,81 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(events[-1]["metrics"]["output_tokens"], 2)
             self.assertEqual(self.requests[0]["model"], "gemma3:4b")
             self.assertEqual(self.requests[0]["options"], {"num_ctx": 4096, "num_predict": 1024})
+            self.wait_for_title("Greeting the assistant")
+            self.assertEqual(self.title_requests[0]["messages"][-1]["content"], "Hello")
             self.assertTrue(self.client.get("/ready").json()["ready"])
+
+    def test_generated_title_only_uses_first_message_and_preserves_manual_rename(self):
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
+            headers = self.headers(socket)
+            self.assertEqual(self.client.post("/chat", headers=headers, json=self.body()).status_code, 200)
+            self.wait_for_title("Greeting the assistant")
+            second = {**self.body('request-two'), 'messages': [{'role': 'user', 'content': 'A different topic'}]}
+            self.assertEqual(self.client.post("/chat", headers=headers, json=second).status_code, 200)
+            self.assertEqual(len(self.title_requests), 1)
+            self.client.patch(f"/conversations/{self.conversation_id}", json={'title': 'New chat'})
+            self.assertEqual(self.client.post("/chat", headers=headers, json={**self.body('request-three'), 'messages': [{'role': 'user', 'content': 'Another topic'}]}).status_code, 200)
+            self.assertEqual(len(self.title_requests), 1)
+            self.assertEqual(self.client.get(f"/conversations/{self.conversation_id}").json()["title"], 'New chat')
+
+    def test_manual_rename_during_title_generation_wins(self):
+        async def rename_during_title(request):
+            payload = json.loads(request.content)
+            if not payload['stream']:
+                self.app.state.conversations.update(self.conversation_id, title='My own name')
+                return httpx2.Response(200, json={"message": {"content": "Model name"}})
+            return httpx2.Response(200, content='{"message":{"content":"Reply"},"done":true}\n')
+        self.handler = rename_during_title
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
+            events = [json.loads(line) for line in self.client.post("/chat", headers=self.headers(socket), json=self.body()).text.splitlines()]
+            self.assertEqual(events[-1]['type'], 'chat.done')
+            self.wait_for_title('My own name')
+
+    def test_slow_title_does_not_delay_completed_reply(self):
+        title_started = threading.Event()
+        release_title = threading.Event()
+        reply_finished = threading.Event()
+        responses = []
+
+        async def slow_title(request):
+            if not json.loads(request.content)['stream']:
+                title_started.set()
+                await asyncio.to_thread(release_title.wait, 2)
+                return httpx2.Response(200, json={"message": {"content": "Delayed title"}})
+            return httpx2.Response(200, content='{"message":{"content":"Reply"},"done":true}\n')
+
+        self.handler = slow_title
+        self.app.state.chat.max_concurrent = 1
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
+            headers = self.headers(socket)
+
+            def request_reply():
+                responses.append(self.client.post("/chat", headers=headers, json=self.body()))
+                reply_finished.set()
+
+            worker = threading.Thread(target=request_reply)
+            worker.start()
+            try:
+                self.assertTrue(title_started.wait(2))
+                self.assertTrue(reply_finished.wait(0.5), "Chat response waited for title generation")
+                next_reply = self.client.post("/chat", headers=headers, json=self.body("request-two"))
+                self.assertEqual(next_reply.status_code, 429)
+            finally:
+                release_title.set()
+                worker.join(2)
+            self.assertEqual([json.loads(line)['type'] for line in responses[0].text.splitlines()][-1], 'chat.done')
+            self.wait_for_title('Delayed title')
+
+    def test_title_failure_does_not_fail_reply(self):
+        async def title_unavailable(request):
+            if not json.loads(request.content)['stream']:
+                return httpx2.Response(503)
+            return httpx2.Response(200, content='{"message":{"content":"Reply"},"done":true}\n')
+        self.handler = title_unavailable
+        with self.client.websocket_connect(f"/events?conversation_id={self.conversation_id}", headers=ORIGIN) as socket:
+            events = [json.loads(line) for line in self.client.post("/chat", headers=self.headers(socket), json=self.body()).text.splitlines()]
+            self.assertEqual(events[-1]['type'], 'chat.done')
+            self.assertEqual(self.client.get(f"/conversations/{self.conversation_id}").json()["title"], 'New chat')
 
     def test_ollama_failure_is_safe_and_does_not_disable_dictation(self):
         async def unavailable(request):

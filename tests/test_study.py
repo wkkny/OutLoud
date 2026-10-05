@@ -641,6 +641,10 @@ class StudyTests(unittest.TestCase):
             self.client = self.open_client()
         subject = self.create_subject()
         conversation = self.study_conversation(subject)
+        # This test exercises chat and upload capacity only. A successful chat
+        # would otherwise start the background title request and consume the
+        # single model slot before the second iteration.
+        self.client.app.state.conversations.update(conversation, title='Capacity test')
         image = io.BytesIO()
         Image.new('RGB', (32, 32), 'white').save(image, format='PNG')
         entered, release = threading.Event(), threading.Event()

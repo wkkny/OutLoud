@@ -46,6 +46,9 @@ class ConversationStore:
             CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id, created_at, id);
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(conversations)")}
+        if "title_origin" not in columns:
+            self.db.execute("ALTER TABLE conversations ADD COLUMN title_origin TEXT NOT NULL DEFAULT 'default'")
+            self.db.execute("UPDATE conversations SET title_origin='manual' WHERE title!='New chat'")
         if "draft_version" not in columns:
             self.db.execute("ALTER TABLE conversations ADD COLUMN draft_version INTEGER NOT NULL DEFAULT 0")
         if "subject_id" not in columns:
@@ -95,17 +98,17 @@ class ConversationStore:
                     message["turn_context"] = json.loads(message["turn_context"])
             return result
 
-    def create(self, title="New chat", subject_id=None, mode="chat", topic_ids=None, focus_topic_id=None):
+    def create(self, title="New chat", subject_id=None, mode="chat", topic_ids=None, focus_topic_id=None, *, allow_generated_title=False):
         conversation_id = str(uuid.uuid4())
         now = _now()
         with self.lock, self.db:
-            self.db.execute("INSERT INTO conversations(id,title,subject_id,mode,topic_ids,focus_topic_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (conversation_id, title, subject_id, mode, json.dumps(topic_ids or []), focus_topic_id, now, now))
+            self.db.execute("INSERT INTO conversations(id,title,title_origin,subject_id,mode,topic_ids,focus_topic_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (conversation_id, title, 'default' if title == 'New chat' or allow_generated_title else 'manual', subject_id, mode, json.dumps(topic_ids or []), focus_topic_id, now, now))
         return self.get(conversation_id)
 
     def update(self, conversation_id, *, title=None, draft=None, draft_version=None, subject_id=_UNSET, mode=None, topic_ids=None, focus_topic_id=_UNSET):
         updates, values = [], []
         if title is not None:
-            updates.append("title=?")
+            updates.extend(["title=?", "title_origin='manual'"])
             values.append(title)
         if draft is not None:
             updates.extend(["draft=?", "draft_version=draft_version+1"])
@@ -137,6 +140,22 @@ class ConversationStore:
                     raise DraftConflict("This draft changed in another tab. Reload it before saving.")
                 return None
             return self.get(conversation_id)
+
+    def title_seed(self, conversation_id):
+        with self.lock:
+            row = self.db.execute("SELECT title, title_origin FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if row is None or row['title_origin'] != 'default':
+                return None
+            first = self.db.execute("SELECT content FROM messages WHERE conversation_id=? AND role='user' ORDER BY rowid LIMIT 1", (conversation_id,)).fetchone()
+            return first[0] if first else None
+
+    def set_generated_title(self, conversation_id, title):
+        with self.lock, self.db:
+            result = self.db.execute(
+                "UPDATE conversations SET title=?, title_origin='generated', updated_at=? WHERE id=? AND title_origin='default'",
+                (title, _now(), conversation_id),
+            )
+            return result.rowcount == 1
 
     def apply_transcript(self, recording_id, conversation_id, text):
         """Atomically return (delivery_allowed, draft_changed) after an append."""

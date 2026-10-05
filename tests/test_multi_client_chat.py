@@ -35,7 +35,10 @@ class MultiClientChatTests(unittest.TestCase):
         self.addCleanup(lambda: self.client.__exit__(None, None, None))
 
     async def reply(self, request):
-        self.requests.append(json.loads(request.content))
+        payload = json.loads(request.content)
+        if not payload['stream']:
+            return httpx2.Response(200, json={"message": {"content": "First chat title"}})
+        self.requests.append(payload)
         return httpx2.Response(200, content='{"message":{"content":"Hello"},"done":true}\n')
 
     def open_client(self):

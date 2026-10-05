@@ -14,18 +14,15 @@ import { useConversations } from '@/hooks/use-conversations'
 import { useChat } from '@/hooks/use-chat'
 import { readUnscopedDraft, writeUnscopedDraft, type PendingSend } from '@/lib/chat-recovery'
 import { AppSidebar } from '@/components/app-sidebar'
-import { ConversationActions } from '@/components/conversation-actions'
 import { request, type WorkspaceContext } from '@/lib/conversations'
 import { Card, CardContent } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
 import { Label } from '@/components/ui/label'
-import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { StudyArea } from '@/components/study-area'
-import { ConversationTopicControls } from '@/components/conversation-topic-controls'
 import { getStudySession, judgmentLabels, studyJson, type StudySession, type StudyAction } from '@/lib/study'
 import { listSubjects, type StudySubject } from '@/lib/study'
 import './chat-ui.css'
@@ -158,20 +155,9 @@ function ChatApp() {
   return <TooltipProvider><SidebarProvider className="chat-app dark">
     <AppSidebar library={library} list={list} selectedId={selectedId} subjects={subjects} connected={connected} loading={conversations.loading} creating={creating} onStudy={() => setStudyOpen(true)} onChat={() => setStudyOpen(false)} onMode={mode => { if (selectedId) void library.updateWorkspace(selectedId, { mode }) }} onCreate={(subjectId, subject) => { setStudyOpen(false); void createChat(subjectId, subject) }} />
     <SidebarInset className="chat-main">
-      <header className="chat-topbar">
-        <div className="chat-heading flex min-w-0 items-center gap-3">
-          <SidebarTrigger className="chat-sidebar-toggle" />
-          <Separator orientation="vertical" className="h-5" />
-          <nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><strong>OutLoud</strong><span>/</span>{studyOpen ? 'Study dashboard' : selected?.title ?? 'New conversation'}{!studyOpen && selectedSubject && <> <span>/</span> {selectedSubject.name}{selected?.focus_topic_id && <> <span>/</span> {selectedSubject.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</>}</nav>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {studyOpen && recording && <Button variant="destructive" size="sm" onClick={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')}>Stop recording</Button>}
-          {selected && !studyOpen && <ConversationActions key={selected.id} conversation={selected} library={library} enabled={connected} />}
-        </div>
-      </header>
-      {studyOpen ? <StudyArea library={library} connected={connected} sessionId={dictation.sessionId} onOpenConversation={() => { setStudyOpen(false); void refreshSubjects() }} onSubjectsChanged={setSubjects} /> : <div className="workspace-layout">
+      <SidebarTrigger className="chat-sidebar-toggle" />
+      {studyOpen ? <StudyArea library={library} connected={connected} sessionId={dictation.sessionId} recording={recording} onStopRecording={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')} onOpenConversation={() => { setStudyOpen(false); void refreshSubjects() }} onSubjectsChanged={setSubjects} /> : <div className="workspace-layout">
         <div className="chat-content">
-        <ConversationTopicControls conversation={selected} subject={selectedSubject} library={library} disabled={!connected || recording || Boolean(draft?.text.trim())} />
         <div className="session-alerts">
           {studySession && selected?.mode === 'study' && <section className="study-session" aria-label="Study topic"><div className="study-actions"><strong>{judgmentLabels[studySession.topic.judgment]}</strong><Button size="sm" variant="ghost" onClick={() => setStudyOpen(true)}>View study progress</Button></div><p>Exam importance: {studySession.topic.weight === null ? 'Unknown' : `${studySession.topic.weight}%`}</p>{studySession.question && <p>Active question: {studySession.question}</p>}{Boolean(studySession.hinted) && <p>This conversation has received guidance for its current topic.</p>}{['failed', 'cancelled'].includes(selected.messages.at(-1)?.status ?? '') && <Button size="sm" variant="outline" disabled={!canRetry} onClick={() => { const answer = selected.messages.findLast(message => message.role === 'user'); if (answer) { const context = answer.turn_context; const action = ['answer', 'explain', 'practice', 'finish'].includes(context?.action ?? '') ? context!.action as StudyAction : studySession.last_action; void send(undefined, { text: answer.content, action, retryOfMessageId: context ? answer.id : undefined, workspace: { mode: context?.mode ?? 'study', topic_ids: context?.topic_ids ?? selected.topic_ids, focus_topic_id: context?.focus_topic_id ?? selected.focus_topic_id } }) } }}>Retry feedback</Button>}</section>}
           {dictation.safety !== 'none' && <Alert variant={dictation.safety === 'unconfirmed' ? 'destructive' : 'default'}>
