@@ -165,7 +165,7 @@ function ChatApp() {
         <div className="chat-heading flex min-w-0 items-center gap-3">
           <SidebarTrigger className="chat-sidebar-toggle" />
           <Separator orientation="vertical" className="h-5" />
-          <div className="workspace-breadcrumb"><strong>OutLoud</strong><span>/</span>{studyOpen ? 'Study dashboard' : selected?.title ?? 'New conversation'}{!studyOpen && selectedSubject && <> <span>/</span> {selectedSubject.name}{selected?.focus_topic_id && <> <span>/</span> {selectedSubject.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</>}</div>
+          <nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><strong>OutLoud</strong><span>/</span>{studyOpen ? 'Study dashboard' : selected?.title ?? 'New conversation'}{!studyOpen && selectedSubject && <> <span>/</span> {selectedSubject.name}{selected?.focus_topic_id && <> <span>/</span> {selectedSubject.topics.find(topic => topic.id === selected.focus_topic_id)?.name ?? 'Topic'}</>}</>}</nav>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {studyOpen && recording && <Button variant="destructive" size="sm" onClick={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')}>Stop recording</Button>}
