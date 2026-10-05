@@ -14,7 +14,7 @@ async function open() {
   return view
 }
 
-it('keeps one persistent connection notification through retries and resolves it after reconnecting', async () => {
+it('keeps connection retries and recovery quiet in the notification area', async () => {
   await open()
   vi.useFakeTimers()
   const composer = screen.getByRole('textbox', { name: 'Your text' })
@@ -22,29 +22,16 @@ it('keeps one persistent connection notification through retries and resolves it
   for (const delay of [500, 1000, 2000, 4000]) {
     await act(async () => backend.socket().onerror?.())
     const notifications = screen.getByRole('region', { name: 'Notifications' })
-    expect(within(notifications).getAllByRole('dialog')).toHaveLength(1)
-    expect(within(notifications).getByRole('dialog', { name: 'Trying to reconnect' })).toBeInTheDocument()
+    expect(within(notifications).queryByRole('dialog')).not.toBeInTheDocument()
     await act(async () => vi.advanceTimersByTimeAsync(delay))
   }
   await act(async () => backend.socket().onerror?.())
   const notifications = screen.getByRole('region', { name: 'Notifications' })
-  expect(within(notifications).getAllByRole('dialog')).toHaveLength(1)
-  expect(within(notifications).getByText('Your text is still here. Try reconnecting.')).toBeInTheDocument()
-  expect(notifications).not.toHaveTextContent(/backend|uv run|automatic retries|local drafts/i)
-  expect(within(notifications).getByRole('dialog', { name: "Can't connect to OutLoud" })).toBeInTheDocument()
   await act(async () => vi.advanceTimersByTimeAsync(6000))
-  expect(within(notifications).getByRole('dialog', { name: "Can't connect to OutLoud" })).toBeInTheDocument()
-  fireEvent.mouseEnter(notifications)
-  fireEvent.click(within(notifications).getByRole('button', { name: 'Reconnect to OutLoud' }))
-  await act(async () => {})
   act(() => backend.socket().ready())
   await act(async () => {})
-  expect(within(notifications).queryByRole('dialog', { name: "Can't connect to OutLoud" })).not.toBeInTheDocument()
-  expect(within(notifications).getByRole('dialog', { name: 'Connected again' })).toBeInTheDocument()
+  expect(within(notifications).queryByRole('dialog')).not.toBeInTheDocument()
   expect(composer).toHaveValue('Keep my local words')
-  fireEvent.mouseLeave(notifications)
-  await act(async () => vi.advanceTimersByTimeAsync(6000))
-  expect(within(notifications).queryByRole('dialog', { name: 'Connected again' })).not.toBeInTheDocument()
 })
 
 it('keeps a refused chat request in a persistent toast without sending again automatically', async () => {
@@ -158,6 +145,7 @@ it.each([false, true])('resolves a recording refusal after a successful command 
 
 it('retains a dismissed capacity warning while capacity is unknown during reconnection', async () => {
   await open()
+  vi.useFakeTimers()
   const capacity = { limit: 3, used: 3, available: 0 }
   const notifications = screen.getByRole('region', { name: 'Notifications' })
   act(() => backend.socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, capacity } }))
@@ -165,16 +153,17 @@ it('retains a dismissed capacity warning while capacity is unknown during reconn
   fireEvent.mouseEnter(notifications)
   fireEvent.click(within(notice).getByRole('button', { name: 'Close toast' }))
   await act(async () => backend.socket().onerror?.())
-  fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-  await act(async () => {})
+  await act(async () => vi.advanceTimersByTimeAsync(500))
   act(() => backend.socket().ready({ capacity }))
   await act(async () => {})
   expect(within(notifications).queryByRole('dialog', { name: 'Please wait before recording' })).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
+  vi.useRealTimers()
 })
 
 it('does not respawn a dismissed storage error when the connection recovers but storage is still unavailable', async () => {
   await open()
+  vi.useFakeTimers()
   const baseFetch = backend.fetchMock.getMockImplementation()!
   backend.fetchMock.mockImplementation(async (url, init) => new URL(String(url)).pathname === '/conversations'
     ? Response.json({ detail: 'Storage remains busy' }, { status: 503 }) : baseFetch(url, init))
@@ -184,12 +173,12 @@ it('does not respawn a dismissed storage error when the connection recovers but 
   fireEvent.mouseEnter(notifications)
   fireEvent.click(within(notice).getByRole('button', { name: 'Close toast' }))
   await act(async () => backend.socket().onerror?.())
-  fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-  await act(async () => {})
+  await act(async () => vi.advanceTimersByTimeAsync(500))
   act(() => backend.socket().ready())
   await act(async () => {})
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+  expect(screen.queryByText('Connected · local')).not.toBeInTheDocument()
   expect(within(notifications).queryByRole('dialog', { name: "Couldn't update your chats" })).not.toBeInTheDocument()
+  vi.useRealTimers()
 })
 
 it('announces a different recording failure after the previous one was dismissed', async () => {

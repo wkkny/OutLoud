@@ -604,7 +604,7 @@ it('shows app-wide microphone occupancy without rejecting the tab connection', a
   act(() => backend.socket().emit({ type: 'state.updated', state: { ...initialState, revision: 2, capture_owned: false, client_connected: true, recording: true, conversation_id: 'elsewhere' } }))
   expect(screen.getByText('Microphone occupied in another tab')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+  expect(screen.queryByText('Connected · local')).not.toBeInTheDocument()
 })
 
 it('sends only the latest user message with backend identity, displays the reply and clears the accepted draft', async () => {
@@ -640,7 +640,7 @@ it('backs off failed initial connections, exhausts a bounded retry budget and re
     expect(FakeSocket.instances).toHaveLength(count + 1)
   }
   act(() => backend.socket().onerror?.())
-  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.queryByText('Connection retries exhausted')).not.toBeInTheDocument()
   await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
   expect(FakeSocket.instances).toHaveLength(5)
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Offline edits')
@@ -666,7 +666,7 @@ it('reconnects after loss using the old client safety check even if another tab 
   act(() => backend.socket().ready())
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Retain this')
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
+  expect(screen.queryByText('Connected · local')).not.toBeInTheDocument()
   vi.useRealTimers()
 })
 
@@ -798,18 +798,14 @@ it('allows deliberate cancellation of the displayed conversation only', async ()
   expect(backend.requests.filter((request) => request.path === '/chat/cancel')).toHaveLength(1)
 })
 
-it('bounds stalled initial handshakes and permits an explicit fresh retry after exhaustion', async () => {
+it('bounds stalled initial handshakes without showing connection indicators', async () => {
   vi.useFakeTimers()
   render(<App />)
   await act(async () => { await vi.advanceTimersByTimeAsync(32500) })
   expect(FakeSocket.instances).toHaveLength(5)
-  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.queryByText('Connection retries exhausted')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument()
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue('Saved words')
-  fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
-  expect(FakeSocket.instances).toHaveLength(6)
-  act(() => backend.socket().ready())
-  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-  expect(screen.getByText('Connected · local')).toBeInTheDocument()
 })
 
 it('never reopens capture after loss until the old client releases it, and exhausts safety checks', async () => {
@@ -822,7 +818,7 @@ it('never reopens capture after loss until the old client releases it, and exhau
   act(() => backend.socket().close())
   await act(async () => { await vi.advanceTimersByTimeAsync(14000) })
   expect(screen.getByText('Recording stop is unconfirmed')).toBeInTheDocument()
-  expect(screen.getByText('Connection retries exhausted')).toBeInTheDocument()
+  expect(screen.queryByText('Connection retries exhausted')).not.toBeInTheDocument()
   expect(FakeSocket.instances).toHaveLength(1)
   expect(screen.getByRole('button', { name: 'Start recording' })).toBeDisabled()
 })
@@ -1147,7 +1143,7 @@ it.each([false, true])('recovers a first-message draft after desktop closure, ma
   expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveValue(managedDesktop ? 'First words before closing' : '')
 })
 
-it.each([false, true])('offers desktop restart guidance after connection retries are exhausted, managed desktop = %s', async (managedDesktop) => {
+it.each([false, true])('keeps exhausted connection retries out of the UI, managed desktop = %s', async (managedDesktop) => {
   if (managedDesktop) vi.stubGlobal('outloudDesktop', { managedBackend: true })
   await open()
   vi.useFakeTimers()
@@ -1156,9 +1152,6 @@ it.each([false, true])('offers desktop restart guidance after connection retries
     await act(async () => vi.advanceTimersByTimeAsync(delay))
   }
   await act(async () => backend.socket().onerror?.())
-  const notice = screen.getByRole('dialog', { name: "Can't connect to OutLoud" })
-  expect(notice).toHaveTextContent(managedDesktop
-    ? 'Your text is still here. Try reconnecting, or close and reopen OutLoud if it remains unavailable.'
-    : 'Your text is still here. Try reconnecting.')
-  expect(within(notice).getByRole('button', { name: 'Reconnect to OutLoud' })).toBeEnabled()
+  const notifications = screen.getByRole('region', { name: 'Notifications' })
+  expect(within(notifications).queryByRole('dialog')).not.toBeInTheDocument()
 })

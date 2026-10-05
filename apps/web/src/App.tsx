@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Toaster, createToastManager } from '@/components/ui/toast'
-import { ArrowUp, ChevronDown, RefreshCw, Square } from 'lucide-react'
+import { ArrowUp, ChevronDown, Square } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from '@/components/ui/input-group'
@@ -15,7 +15,6 @@ import { useChat } from '@/hooks/use-chat'
 import { readUnscopedDraft, writeUnscopedDraft, type PendingSend } from '@/lib/chat-recovery'
 import { AppSidebar } from '@/components/app-sidebar'
 import { ConversationActions } from '@/components/conversation-actions'
-import { Badge } from '@/components/ui/badge'
 import { request, type WorkspaceContext } from '@/lib/conversations'
 import { Card, CardContent } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -167,8 +166,6 @@ function ChatApp() {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {studyOpen && recording && <Button variant="destructive" size="sm" onClick={() => void dictation.command('stop', dictation.snapshot?.conversation_id ?? '')}>Stop recording</Button>}
-          <Badge variant={connected ? 'secondary' : 'outline'} role="status" className="connection-status">{connected ? 'Connected · local' : dictation.connection === 'exhausted' ? 'Connection retries exhausted' : dictation.connection === 'retrying' ? 'Reconnecting with backoff…' : 'Connecting…'}</Badge>
-          {!connected && <Button variant="ghost" size="icon-sm" aria-label="Reconnect" disabled={dictation.safety === 'stopping'} onClick={dictation.reconnect}><RefreshCw /></Button>}
           {selected && !studyOpen && <ConversationActions key={selected.id} conversation={selected} library={library} enabled={connected} />}
         </div>
       </header>
