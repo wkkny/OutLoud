@@ -163,7 +163,6 @@ it('retains a dismissed capacity warning while capacity is unknown during reconn
 
 it('does not respawn a dismissed storage error when the connection recovers but storage is still unavailable', async () => {
   await open()
-  vi.useFakeTimers()
   const baseFetch = backend.fetchMock.getMockImplementation()!
   backend.fetchMock.mockImplementation(async (url, init) => new URL(String(url)).pathname === '/conversations'
     ? Response.json({ detail: 'Storage remains busy' }, { status: 503 }) : baseFetch(url, init))
@@ -172,6 +171,7 @@ it('does not respawn a dismissed storage error when the connection recovers but 
   const notice = await within(notifications).findByRole('dialog', { name: "Couldn't update your chats" })
   fireEvent.mouseEnter(notifications)
   fireEvent.click(within(notice).getByRole('button', { name: 'Close toast' }))
+  vi.useFakeTimers()
   await act(async () => backend.socket().onerror?.())
   await act(async () => vi.advanceTimersByTimeAsync(500))
   act(() => backend.socket().ready())
